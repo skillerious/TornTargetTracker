@@ -13,7 +13,7 @@ from PyQt6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QVariant, QSortFilterProxyModel,
     pyqtSignal, QUrl, QSize, QTimer, QItemSelectionModel, QDateTime
 )
-from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QFont, QPixmap, QPainter, QPen, QBrush, QColor, QIcon
+from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QFont, QPixmap, QPainter, QPen, QBrush, QColor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableView, QLineEdit, QToolBar, QCheckBox,
     QPushButton, QMenu, QFileDialog, QDialog, QFormLayout, QSpinBox, QLabel,
@@ -784,7 +784,7 @@ class AboutDialog(QDialog):
     """
     Transparent header, crisp logo (ICO preferred), robust GitHub version check.
     When a newer version is found, shows a green outline pill (transparent inside)
-    and enables 'Release Notes'. Uses a queued signal to update the UI reliably.
+    and enables 'Update'. Uses a queued signal to update the UI reliably.
     """
 
     updateFound = pyqtSignal(str)  # emitted from worker thread → handled in UI thread
@@ -805,7 +805,6 @@ class AboutDialog(QDialog):
         self.setMinimumWidth(580)
 
         # ---------- logging ----------
-        import logging
         self._log = logging.getLogger("TargetTracker.About")
         if not self._log.handlers:
             h = logging.StreamHandler()
@@ -814,7 +813,6 @@ class AboutDialog(QDialog):
             self._log.setLevel(logging.INFO)
 
         # ---------- runtime info ----------
-        import sys, json
         from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR
 
         self.app_name = app_name
@@ -890,10 +888,16 @@ class AboutDialog(QDialog):
         self.header.setObjectName("aboutHeader")
         self.header.setStyleSheet("""
             #aboutHeader { background: transparent; }
-            QLabel#verBadge {
-                color:#bcd6ff; border:1px solid #3d5371; border-radius:10px;
-                padding:2px 8px; font-size:12px; background: transparent;
+
+            /* Blue version pill — same geometry as update pill */
+            QWidget#pillBlue {
+                background: transparent;
+                border: 1px solid #3d5371;
+                border-radius: 11px;
             }
+            QLabel#pillBlueText { color:#bcd6ff; font-size:12px; background: transparent; }
+
+            /* Green update pill */
             QWidget#pill {
                 background: transparent;               /* fully transparent interior */
                 border: 1px solid rgba(46,125,50,0.85);/* green outline */
@@ -936,12 +940,19 @@ class AboutDialog(QDialog):
         title_box.addWidget(self.lbl_title); title_box.addWidget(self.lbl_sub)
         h.addLayout(title_box, 1); h.addStretch(1)
 
-        # simple version badge (no update suffix)
-        self.ver_badge = QLabel(f"Version {self.local_version}")
-        self.ver_badge.setObjectName("verBadge")
-        h.addWidget(self.ver_badge, 0, Qt.AlignmentFlag.AlignTop)
+        # Version pill (match height/padding of update pill)
+        self.version_pill = QWidget()
+        self.version_pill.setObjectName("pillBlue")
+        self.version_pill.setAutoFillBackground(False)
+        vp_l = QHBoxLayout(self.version_pill)
+        vp_l.setContentsMargins(10, 3, 10, 3)   # same padding as update pill
+        vp_l.setSpacing(6)
+        self._version_text = QLabel(f"Version {self.local_version}")
+        self._version_text.setObjectName("pillBlueText")
+        vp_l.addWidget(self._version_text)
+        h.addWidget(self.version_pill, 0, Qt.AlignmentFlag.AlignTop)
 
-        # green pill (transparent interior)
+        # green pill (transparent interior) for updates
         def _green_dot_pm(sz=12):
             pm = QPixmap(sz, sz); pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1013,7 +1024,8 @@ class AboutDialog(QDialog):
         btn_github = _btn("GitHub", "github", "https://github.com/skillerious")
         btn_torn   = _btn("Torn Profile", "link", "https://www.torn.com/profiles.php?XID=3212954")
 
-        self.btn_release = _btn("Release Notes", "update", self.RELEASES_URL)
+        # Renamed to "Update" (was "Release Notes")
+        self.btn_release = _btn("Update", "update", self.RELEASES_URL)
         self.btn_release.setVisible(False)
 
         copy_btn = QPushButton("Copy Diagnostics")
@@ -1045,7 +1057,7 @@ class AboutDialog(QDialog):
 
     # ---------- update logic ----------
     def _check_for_update(self, is_newer_fn):
-        import threading, json, base64, re, time
+        import threading, base64, re, time
         import requests
 
         headers = {
@@ -1127,12 +1139,12 @@ class AboutDialog(QDialog):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _apply_update_visuals(self, remote_version: str):
-        """UI-thread: show transparent green pill and enable Release Notes."""
+        """UI-thread: show transparent green pill and enable Update button."""
         try:
             text = f"Update {remote_version} available"
             self._pill_text.setText(text)
 
-            # ensure 'available' never clips
+            # ensure text never clips
             fm = self._pill_text.fontMetrics()
             min_w = fm.horizontalAdvance(text) + 28  # text + icon + paddings
             self.update_pill.setMinimumWidth(min_w)
@@ -1150,7 +1162,6 @@ class AboutDialog(QDialog):
             self._log.info("Update UI applied (pill shown, min_w=%d).", min_w)
         except Exception as e:
             self._log.info("Apply update visuals failed: %s", e)
-
 
 
 

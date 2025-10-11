@@ -7,19 +7,21 @@ import re
 import time
 from typing import Dict, Optional, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
-from PyQt6.QtGui import QIcon, QDesktopServices, QColor, QPainter, QPixmap, QPalette
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QSize
+from PyQt6.QtGui import (
+    QIcon, QDesktopServices, QColor, QPainter, QPixmap, QPalette, QFontMetrics
+)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QSpinBox,
     QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget, QListWidget,
-    QListWidgetItem, QStyle
+    QListWidgetItem, QStyle, QDialogButtonBox, QGroupBox
 )
 
 from storage import get_appdata_dir, load_targets_from_file
 
 
-# ---------- tiny icon helpers ----------
+# ---------- icon helpers ----------
 def _icon_path(name: str) -> Optional[str]:
     for p in (
         os.path.join("assets", f"ic-{name}.svg"),
@@ -48,33 +50,46 @@ def _base_icon(name: str) -> QIcon:
         "link": QStyle.StandardPixmap.SP_DirLinkIcon,
         "clear": QStyle.StandardPixmap.SP_DialogCloseButton,
         "warning": QStyle.StandardPixmap.SP_MessageBoxWarning,
+        "open": QStyle.StandardPixmap.SP_DialogOpenButton,
+        "save": QStyle.StandardPixmap.SP_DialogSaveButton,
+        "apply": QStyle.StandardPixmap.SP_DialogApplyButton,
+        "help": QStyle.StandardPixmap.SP_DialogHelpButton,
+        "view": QStyle.StandardPixmap.SP_FileDialogInfoView,
+        "new": QStyle.StandardPixmap.SP_FileDialogNewFolder
     }
     return st.standardIcon(fallbacks.get(name, QStyle.StandardPixmap.SP_FileDialogInfoView))
-
-
-def sidebar_icon(name: str, size: int = 18, color: str = "#CFE3FF") -> QIcon:
-    ico = _base_icon(name)
-    pm = ico.pixmap(size, size)
-    if pm.isNull():
-        return ico
-    tinted = QPixmap(pm.size())
-    tinted.fill(Qt.GlobalColor.transparent)
-    p = QPainter(tinted)
-    p.drawPixmap(0, 0, pm)
-    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-    p.fillRect(tinted.rect(), QColor(color))
-    p.end()
-    out = QIcon(); out.addPixmap(tinted)
-    return out
 
 
 def icon(name: str) -> QIcon:
     return _base_icon(name)
 
 
-# ---------- utility ----------
+# ---------- small helpers ----------
 _API_RE = re.compile(r"^[A-Za-z0-9]{16,64}$")
 _CACHE_FILE = os.path.join(get_appdata_dir(), "cache_targets.json")
+
+
+class ElidedLabel(QLabel):
+    """Single-line label that elides middle and shows full text as tooltip."""
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.setMinimumHeight(18)
+        self.setToolTip(text)
+
+    def set_full_text(self, text: str):
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._refresh()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._refresh()
+
+    def _refresh(self):
+        fm = QFontMetrics(self.font())
+        full = getattr(self, "_full", self.toolTip() or self.text())
+        self.setText(fm.elidedText(full, Qt.TextElideMode.ElideMiddle, max(30, self.width())))
 
 
 class SettingsDialog(QDialog):
@@ -85,223 +100,232 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
-        self.setMinimumWidth(760)
-        self.setMinimumHeight(520)
+        # Compact by default; resizable both ways
+        self.setMinimumSize(QSize(680, 480))
+        self.resize(740, 520)
 
         self._settings = dict(settings or {})
         self._dirty = False
 
-        self._apply_flat_style()
+        self._apply_style()
 
-        # skeleton
-        outer = QVBoxLayout(self); outer.setContentsMargins(12, 12, 12, 12); outer.setSpacing(10)
+        # ---------- skeleton (sidebar + stack) ----------
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
         outer.addWidget(self._build_header())
 
-        center = QWidget(); cl = QHBoxLayout(center); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(10)
-        self.sidebar = QListWidget(objectName="sidebar"); self.sidebar.setFixedWidth(236)
+        center = QWidget(); cl = QHBoxLayout(center)
+        cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(12)
+
+        self.sidebar = QListWidget(objectName="sidebar")
+        self.sidebar.setFixedWidth(208)
+
         self.stack = QStackedWidget()
-        cl.addWidget(self.sidebar); cl.addWidget(self.stack, 1)
+
+        cl.addWidget(self.sidebar)
+        cl.addWidget(self.stack, 1)
         outer.addWidget(center, 1)
-        outer.addWidget(self._build_footer())
 
+        # Standard button box
+        self.btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.RestoreDefaults |
+            QDialogButtonBox.StandardButton.Save |
+            QDialogButtonBox.StandardButton.Cancel |
+            QDialogButtonBox.StandardButton.Apply
+        )
+        self.btn_box.button(QDialogButtonBox.StandardButton.Save).setDefault(True)
+        outer.addWidget(self.btn_box)
+
+        # Build pages + wire
         self._build_pages()
-
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
 
-    # ---------- palette-aware *flat* stylesheet (no dark plates) ----------
-    def _apply_flat_style(self):
-        pal: QPalette = (self.parent().palette() if isinstance(self.parent(), QWidget)
-                         else QApplication.palette())
-        base_win = pal.color(QPalette.ColorRole.Window).name()
-        text_col = pal.color(QPalette.ColorRole.WindowText).name()
-        focus_col = pal.color(QPalette.ColorRole.Highlight).name()
+        self.btn_box.clicked.connect(self._on_button)
+        self._update_footer_state()
 
-        BORDER = "rgba(255,255,255,0.10)"
-        HOVER = "rgba(255,255,255,0.08)"
-        # Important: no background-color fills on cards/labels/inputs; rely on theme palette.
+    def _apply_style(self):
+        # Keep the dialog consistent with the global palette (QDarkStyle, etc.)
+        pal = QApplication.palette()
+        border = pal.color(QPalette.ColorRole.Mid)
+        focus  = pal.color(QPalette.ColorRole.Highlight)
+        text   = pal.color(QPalette.ColorRole.WindowText)
+        win    = pal.color(QPalette.ColorRole.Window)
+
+        def rgba(c: QColor, a: float) -> str:
+            a = max(0.0, min(1.0, a))
+            return f"rgba({c.red()},{c.green()},{c.blue()},{a:.3f})"
+
+        # Detect if we're in a dark theme to choose the right overlay direction
+        luminance = (0.2126 * win.redF()) + (0.7152 * win.greenF()) + (0.0722 * win.blueF())
+        is_dark = luminance < 0.5
+
+        # Subtle card background for QGroupBox: a *slightly* darker overlay on dark themes
+        CARD_ALPHA_DARK = 0.12   # tweak here if you want it a touch lighter/darker (0.10–0.14)
+        CARD_ALPHA_LIGHT = 0.06  # for light themes (kept for completeness)
+
+        card_bg = rgba(QColor(0, 0, 0), CARD_ALPHA_DARK) if is_dark else rgba(QColor(255, 255, 255), CARD_ALPHA_LIGHT)
+
+        border_css = border.name()
+        hover_css  = rgba(focus, 0.10)
+        muted_css  = rgba(text, 0.70)
+        note_css   = rgba(focus, 0.85)
 
         self.setStyleSheet(f"""
-            QDialog {{
-                background-color: {base_win};
-                color: {text_col};
-            }}
-
-            QLabel, QCheckBox, QGroupBox, QTextBrowser {{
-                background: transparent;
-            }}
+            /* Inherit window background from app/theme */
+            QLabel, QCheckBox, QTextBrowser {{ background: transparent; }}
 
             /* Sidebar */
             QListWidget#sidebar {{
-                border: 1px solid {BORDER};
+                border: 1px solid {border_css};
                 border-radius: 10px;
-                background: transparent;
                 padding: 6px;
-                outline: 0;
             }}
             QListWidget#sidebar::item {{
-                padding: 8px 12px;
+                padding: 8px 10px;
                 border-radius: 8px;
                 margin: 1px 0;
             }}
             QListWidget#sidebar::item:selected {{
-                background: {HOVER};
-                border: 1px solid {focus_col};
+                background: {hover_css};
+                border: 1px solid {focus.name()};
             }}
-            QListWidget#sidebar::item:hover {{ background: {HOVER}; }}
+            QListWidget#sidebar::item:hover {{ background: {hover_css}; }}
 
-            /* Cards: flat (transparent) with subtle border only */
-            QFrame#card {{
-                background: transparent;
-                border: 1px solid {BORDER};
+            /* Cards (group boxes) — now slightly darker for contrast */
+            QGroupBox {{
+                border: 1px solid {border_css};
                 border-radius: 10px;
+                margin-top: 10px;
+                padding: 10px;
+                background: {card_bg};
             }}
-            QLabel.cardTitle {{ font-size: 14px; font-weight: 600; padding-bottom: 2px; }}
-            .muted {{ color: rgba(255,255,255,0.70); }}
-            .good {{ color: #8ee6b3; }}
-            .bad  {{ color: #ff9b8e; }}
-            .note {{ color: #cfe3ff; }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                font-weight: 600;
+                color: {note_css};
+            }}
 
-            /* Inputs: keep theme background; add only subtle border & padding */
-            QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
-                border: 1px solid {BORDER};
+            /* Inputs */
+            QLineEdit, QSpinBox, QComboBox {{
+                border: 1px solid {border_css};
                 border-radius: 6px;
-                padding: 5px 8px;
+                padding: 4px 6px;
                 min-height: 26px;
+                background: transparent;
             }}
-            QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus {{
-                border: 1px solid {focus_col};
-                outline: none;
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
+                border: 1px solid {focus.name()};
             }}
 
-            /* Buttons: flat with hover tint */
+            /* Buttons */
             QToolButton, QPushButton {{
-                border: 1px solid {BORDER};
+                border: 1px solid {border_css};
                 border-radius: 8px;
-                padding: 6px 10px;
+                padding: 5px 10px;
                 background: transparent;
                 min-height: 26px;
             }}
-            QToolButton:hover, QPushButton:hover {{ background: {HOVER}; }}
-            QPushButton#btnPrimary {{ border: 1px solid {focus_col}; }}
+            QToolButton:hover, QPushButton:hover {{ background: {hover_css}; }}
+
+            /* Utility text classes */
+            .muted {{ color: {muted_css}; }}
+            .good  {{ color: rgb(142, 230, 179); }}
+            .bad   {{ color: rgb(255, 155, 142); }}
+            .note  {{ color: {note_css}; }}
         """)
 
-    # ---------- header / footer ----------
+
+
+    # ---------- header ----------
     def _build_header(self) -> QWidget:
-        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0,0,0,0); h.setSpacing(10)
-        ic = QLabel(); ic.setPixmap(icon("settings").pixmap(22, 22)); h.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
-        box = QVBoxLayout(); box.setSpacing(2)
-        title = QLabel("<span style='font-size:17px; font-weight:600;'>Settings</span>")
+        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0,0,0,0); h.setSpacing(8)
+        ic = QLabel(); ic.setPixmap(icon("settings").pixmap(20, 20)); h.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
+        box = QVBoxLayout(); box.setSpacing(1)
+        title = QLabel("<span style='font-size:16px; font-weight:600;'>Settings</span>")
         sub = QLabel("Tweak your API, cache, and performance preferences"); sub.setProperty("class", "muted")
         box.addWidget(title); box.addWidget(sub)
         h.addLayout(box, 1); h.addStretch(1)
         return w
 
-    def _build_footer(self) -> QWidget:
-        w = QWidget(); hb = QHBoxLayout(w); hb.setContentsMargins(0,0,0,0)
-        hb.addStretch(1)
-        self.btn_reset = QPushButton("Reset values")
-        self.btn_apply = QPushButton("Apply"); self.btn_apply.setObjectName("btnPrimary")
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_save = QPushButton("Save"); self.btn_save.setObjectName("btnPrimary")
-        for b in (self.btn_reset, self.btn_apply, self.btn_cancel, self.btn_save):
-            b.setMinimumWidth(98)
-        hb.addWidget(self.btn_reset); hb.addWidget(self.btn_apply); hb.addWidget(self.btn_cancel); hb.addWidget(self.btn_save)
-
-        self.btn_reset.clicked.connect(self._reset_values)
-        self.btn_apply.clicked.connect(self._apply)
-        self.btn_cancel.clicked.connect(self._maybe_discard_and_close)
-        self.btn_save.clicked.connect(self._save_and_close)
-        self._update_footer_state()
-        return w
-
-    # card helper (fixed)
-    def _card(self, title: str) -> tuple[QFrame, QVBoxLayout]:
-        wrapper = QFrame(objectName="card")
-        outer = QVBoxLayout(wrapper); outer.setContentsMargins(12, 12, 12, 12); outer.setSpacing(8)
-        ttl = QLabel(title); ttl.setProperty("class", "cardTitle")
-        outer.addWidget(ttl)
-        body = QWidget(); vb = QVBoxLayout(body); vb.setContentsMargins(0,0,0,0); vb.setSpacing(6)
-        outer.addWidget(body)
-        return wrapper, vb
-
     # ---------- pages ----------
     def _build_pages(self):
-        self.sidebar.addItem(QListWidgetItem(sidebar_icon("info"), "General"))
-        self.sidebar.addItem(QListWidgetItem(sidebar_icon("folder"), "Data & Cache"))
-        self.sidebar.addItem(QListWidgetItem(sidebar_icon("check"), "Performance"))
-        self.sidebar.addItem(QListWidgetItem(sidebar_icon("refresh"), "Retries & Backoff"))
-        self.sidebar.addItem(QListWidgetItem(sidebar_icon("info"), "Help"))
+        self.sidebar.addItem(QListWidgetItem(icon("general"), "General"))
+        self.sidebar.addItem(QListWidgetItem(icon("folder"), "Data & Cache"))
+        self.sidebar.addItem(QListWidgetItem(icon("performance"), "Performance"))
+        self.sidebar.addItem(QListWidgetItem(icon("refresh"), "Retries & Backoff"))
+        self.sidebar.addItem(QListWidgetItem(icon("help"), "Help"))
 
         # GENERAL
-        general = QWidget(); gl = QVBoxLayout(general); gl.setContentsMargins(0,0,0,0); gl.setSpacing(10)
+        general = QWidget(); gl = QVBoxLayout(general); gl.setContentsMargins(2,2,2,2); gl.setSpacing(10)
 
-        # Torn API
+        # Torn API group
+        api_g = QGroupBox("Torn API"); api_l = QGridLayout(api_g); api_l.setHorizontalSpacing(8); api_l.setVerticalSpacing(6)
         self.ed_api = QLineEdit(self._settings.get("api_key", ""))
         self.ed_api.setEchoMode(QLineEdit.EchoMode.Password)
         self.lbl_api_status = QLabel(""); self.lbl_api_status.setProperty("class", "muted")
 
-        btn_show = QToolButton(text="Show"); btn_show.setCheckable(True)
+        btn_show = QToolButton(); btn_show.setText("Show"); btn_show.setCheckable(True)
         btn_show.toggled.connect(lambda ch: self.ed_api.setEchoMode(QLineEdit.EchoMode.Normal if ch else QLineEdit.EchoMode.Password))
-        btn_paste = QToolButton(text="Paste"); btn_paste.clicked.connect(self._paste_api)
-        btn_open = QPushButton("Open API Page"); btn_open.setIcon(icon("link"))
+        btn_paste = QToolButton(); btn_paste.setText("Paste"); btn_paste.clicked.connect(self._paste_api)
+
+        btn_open = QToolButton(); btn_open.setIcon(icon("link")); btn_open.setToolTip("Open API Page")
         btn_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.API_KEY_HELP_URL)))
-        btn_test = QPushButton("Test Key"); btn_test.setIcon(icon("check")); btn_test.clicked.connect(self._test_key)
+        btn_test = QToolButton(); btn_test.setIcon(icon("check")); btn_test.setToolTip("Test Key")
+        btn_test.clicked.connect(self._test_key)
 
-        api_row = QWidget(); ar = QHBoxLayout(api_row); ar.setContentsMargins(0,0,0,0); ar.setSpacing(6)
-        ar.addWidget(self.ed_api, 1); ar.addWidget(btn_show); ar.addWidget(btn_paste); ar.addWidget(btn_open); ar.addWidget(btn_test)
+        api_l.addWidget(QLabel("API Key:"), 0, 0)
+        api_l.addWidget(self.ed_api, 0, 1)
+        row_btns = QWidget(); rb = QHBoxLayout(row_btns); rb.setContentsMargins(0,0,0,0); rb.setSpacing(6)
+        for w in (btn_show, btn_paste, btn_open, btn_test):
+            rb.addWidget(w)
+        api_l.addWidget(row_btns, 0, 2)
+        api_l.addWidget(self.lbl_api_status, 1, 1, 1, 2)
 
-        api_form = QFormLayout(); api_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        api_form.setHorizontalSpacing(8); api_form.setVerticalSpacing(6)
-        api_form.addRow("API Key:", api_row)
-        api_form.addRow("", self.lbl_api_status)
-
-        api_card, api_body = self._card("Torn API")
-        api_body.addLayout(api_form)
-
-        # Targets + Window
-        row_tw = QWidget(); tw = QHBoxLayout(row_tw); tw.setContentsMargins(0,0,0,0); tw.setSpacing(10)
+        # Targets & Window group
+        tgt_g = QGroupBox("Targets & Window"); tgt_f = QFormLayout(tgt_g)
+        tgt_f.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        tgt_f.setHorizontalSpacing(8); tgt_f.setVerticalSpacing(6)
 
         self.ed_targets = QLineEdit(self._settings.get("targets_file", "target.json"))
-        btn_browse = QPushButton("Browse…"); btn_browse.setIcon(icon("folder")); btn_browse.clicked.connect(self._pick_targets)
-        btn_create = QPushButton("Create"); btn_create.clicked.connect(self._create_targets_file)
-        self.lbl_targets_hint = QLabel(""); self.lbl_targets_hint.setProperty("class", "muted")
+        self.ed_targets.setMinimumWidth(240)
+        btn_browse = QToolButton(); btn_browse.setIcon(icon("folder")); btn_browse.setToolTip("Browse…")
+        btn_browse.clicked.connect(self._pick_targets)
+        btn_create = QToolButton(); btn_create.setIcon(icon("new")); btn_create.setToolTip("Create file")
+        btn_create.clicked.connect(self._create_targets_file)
 
         tgt_row = QWidget(); tr = QHBoxLayout(tgt_row); tr.setContentsMargins(0,0,0,0); tr.setSpacing(6)
         tr.addWidget(self.ed_targets, 1); tr.addWidget(btn_browse); tr.addWidget(btn_create)
 
-        tgt_form = QFormLayout(); tgt_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        tgt_form.setHorizontalSpacing(8); tgt_form.setVerticalSpacing(6)
-        tgt_form.addRow("Targets file:", tgt_row)
-        tgt_form.addRow("", self.lbl_targets_hint)
-
-        targets_card, targets_body = self._card("Targets")
-        targets_body.addLayout(tgt_form)
-
+        self.lbl_targets_hint = ElidedLabel(); self.lbl_targets_hint.setProperty("class", "muted")
         self.chk_start_max = QCheckBox("Start maximized")
         self.chk_start_max.setChecked(bool(self._settings.get("start_maximized", True)))
-        win_form = QFormLayout(); win_form.addRow("", self.chk_start_max)
-        window_card, window_body = self._card("Window")
-        window_body.addLayout(win_form)
 
-        tw.addWidget(targets_card, 3)
-        tw.addWidget(window_card, 2)
+        tgt_f.addRow("Targets file:", tgt_row)
+        tgt_f.addRow("", self.lbl_targets_hint)
+        tgt_f.addRow("", self.chk_start_max)
 
-        gl.addWidget(api_card)
-        gl.addWidget(row_tw)
+        gl.addWidget(api_g)
+        gl.addWidget(tgt_g)
         gl.addStretch(1)
 
         # DATA & CACHE
-        data = QWidget(); dl = QVBoxLayout(data); dl.setContentsMargins(0,0,0,0); dl.setSpacing(10)
+        data = QWidget(); dl = QVBoxLayout(data); dl.setContentsMargins(2,2,2,2); dl.setSpacing(10)
 
+        app_g = QGroupBox("AppData"); app_l = QGridLayout(app_g); app_l.setHorizontalSpacing(8); app_l.setVerticalSpacing(6)
         self.ed_appdata = QLineEdit(get_appdata_dir()); self.ed_appdata.setReadOnly(True)
         btn_open_folder = QPushButton("Open Folder"); btn_open_folder.setIcon(icon("folder"))
         btn_open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(get_appdata_dir())))
-        ad_row = QWidget(); adl = QHBoxLayout(ad_row); adl.setContentsMargins(0,0,0,0); adl.setSpacing(6)
-        adl.addWidget(self.ed_appdata, 1); adl.addWidget(btn_open_folder)
+        app_l.addWidget(self.ed_appdata, 0, 0, 1, 1)
+        app_l.addWidget(btn_open_folder, 0, 1, 1, 1)
 
-        app_card, app_body = self._card("AppData")
-        app_body.addWidget(ad_row)
+        cache_g = QGroupBox("Cache"); cache_f = QFormLayout(cache_g)
+        cache_f.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        cache_f.setHorizontalSpacing(8); cache_f.setVerticalSpacing(6)
 
         self.chk_load_cache = QCheckBox("Load cache at startup")
         self.chk_load_cache.setChecked(bool(self._settings.get("load_cache_at_start", True)))
@@ -312,24 +336,21 @@ class SettingsDialog(QDialog):
         btn_clear_cache = QPushButton("Clear cache…"); btn_clear_cache.setIcon(icon("clear"))
         btn_clear_cache.clicked.connect(self._clear_cache)
 
-        cache_form = QFormLayout(); cache_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        cache_form.setHorizontalSpacing(8); cache_form.setVerticalSpacing(6)
-        cache_form.addRow("", self.chk_load_cache)
-        cache_form.addRow("Save cache every:", self.sb_save_every)
-        cache_form.addRow("", self.lbl_cache_info)
-
-        cache_card, cache_body = self._card("Cache")
-        cache_body.addLayout(cache_form)
+        cache_f.addRow("", self.chk_load_cache)
+        cache_f.addRow("Save cache every:", self.sb_save_every)
+        cache_f.addRow("", self.lbl_cache_info)
         row_clear = QWidget(); rc = QHBoxLayout(row_clear); rc.setContentsMargins(0,0,0,0); rc.addStretch(1); rc.addWidget(btn_clear_cache)
-        cache_body.addWidget(row_clear)
+        cache_f.addRow("", row_clear)
 
-        dl.addWidget(app_card)
-        dl.addWidget(cache_card)
+        dl.addWidget(app_g)
+        dl.addWidget(cache_g)
         dl.addStretch(1)
 
         # PERFORMANCE
-        perf = QWidget(); pl = QVBoxLayout(perf); pl.setContentsMargins(0,0,0,0); pl.setSpacing(10)
-        gridw = QWidget(); grid = QGridLayout(gridw); grid.setContentsMargins(0,0,0,0); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(8)
+        perf = QWidget(); pl = QVBoxLayout(perf); pl.setContentsMargins(2,2,2,2); pl.setSpacing(10)
+
+        perf_g = QGroupBox("Performance"); grid = QGridLayout(perf_g)
+        grid.setHorizontalSpacing(8); grid.setVerticalSpacing(8)
 
         self.sb_conc = QSpinBox(); self.sb_conc.setRange(1, 16); self.sb_conc.setValue(int(self._settings.get("concurrency", 4)))
         self.sl_conc = QSlider(Qt.Orientation.Horizontal); self.sl_conc.setRange(1, 16); self.sl_conc.setValue(self.sb_conc.value())
@@ -346,6 +367,7 @@ class SettingsDialog(QDialog):
         self.btn_recommended = QPushButton("Recommended (Torn safe)"); self.btn_recommended.setIcon(icon("check"))
         self.btn_recommended.clicked.connect(self._apply_recommended)
 
+        # Bindings
         self._bind_pair(self.sb_conc, self.sl_conc)
         self._bind_pair(self.sb_auto, self.sl_auto)
         self._bind_pair(self.sb_rate_cap, self.sl_rate_cap)
@@ -359,17 +381,16 @@ class SettingsDialog(QDialog):
         grid.addWidget(self.lbl_effective, r, 0, 1, 3); r += 1
         grid.addWidget(self.lbl_estimate, r, 0, 1, 3)
 
-        perf_card, perf_body = self._card("Performance")
-        perf_body.addWidget(gridw)
         row_btn = QWidget(); rb = QHBoxLayout(row_btn); rb.setContentsMargins(0,0,0,0); rb.addStretch(1); rb.addWidget(self.btn_recommended)
 
-        pl.addWidget(perf_card)
+        pl.addWidget(perf_g)
         pl.addWidget(row_btn)
         pl.addStretch(1)
 
-        # RETRIES / BACKOFF
-        back = QWidget(); bl = QVBoxLayout(back); bl.setContentsMargins(0,0,0,0); bl.setSpacing(10)
-        form = QFormLayout(); form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # RETRIES
+        back = QWidget(); bl = QVBoxLayout(back); bl.setContentsMargins(2,2,2,2); bl.setSpacing(10)
+        back_g = QGroupBox("Retries & Backoff"); form = QFormLayout(back_g)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setHorizontalSpacing(8); form.setVerticalSpacing(6)
 
         self.sb_max_retries = QSpinBox(); self.sb_max_retries.setRange(1, 12); self.sb_max_retries.setValue(int(self._settings.get("max_retries", 8)))
@@ -386,26 +407,24 @@ class SettingsDialog(QDialog):
         form.addRow("", self.lbl_backoff_hint)
         form.addRow("", self.lbl_backoff_table)
 
-        back_card, back_body = self._card("Retries & Backoff")
-        back_body.addLayout(form)
-        bl.addWidget(back_card)
+        bl.addWidget(back_g)
         bl.addStretch(1)
 
         # HELP
-        helpw = QWidget(); hl = QVBoxLayout(helpw); hl.setContentsMargins(0,0,0,0); hl.setSpacing(10)
-        help_box = QTextBrowser(); help_box.setOpenExternalLinks(True)
+        helpw = QWidget(); hl = QVBoxLayout(helpw); hl.setContentsMargins(2,2,2,2); hl.setSpacing(10)
+        help_g = QGroupBox("Help"); help_box = QTextBrowser(); help_box.setOpenExternalLinks(True)
         help_box.setHtml(self._help_html())
-        help_card, help_body = self._card("Help"); help_body.addWidget(help_box)
-        hl.addWidget(help_card, 1)
+        help_v = QVBoxLayout(help_g); help_v.setContentsMargins(8,8,8,8); help_v.addWidget(help_box)
+        hl.addWidget(help_g, 1)
 
-        # stack
+        # Add to stack
         self.stack.addWidget(general)
         self.stack.addWidget(data)
         self.stack.addWidget(perf)
         self.stack.addWidget(back)
         self.stack.addWidget(helpw)
 
-        # init
+        # init dynamic text + signals
         self._validate_api_key()
         self._update_targets_hint()
         self._update_cache_info()
@@ -437,10 +456,22 @@ class SettingsDialog(QDialog):
         if spin in (self.sb_rate_cap, self.sb_min_interval, self.sb_auto, self.sb_conc):
             spin.valueChanged.connect(self._update_effective_pacing)
 
+    # ---------- button box ----------
+    def _on_button(self, button):
+        std = self.btn_box.standardButton(button)
+        if std == QDialogButtonBox.StandardButton.RestoreDefaults:
+            self._reset_values()
+        elif std == QDialogButtonBox.StandardButton.Apply:
+            self._apply()
+        elif std == QDialogButtonBox.StandardButton.Save:
+            self._apply()
+            self.accept()
+        elif std == QDialogButtonBox.StandardButton.Cancel:
+            self._maybe_discard_and_close()
+
     # ---------- footer state ----------
     def _update_footer_state(self):
-        self.btn_apply.setEnabled(self._dirty)
-        self.btn_save.setEnabled(True)
+        self.btn_box.button(QDialogButtonBox.StandardButton.Apply).setEnabled(self._dirty)
 
     def _mark_dirty(self, *_):
         self._dirty = True
@@ -482,10 +513,6 @@ class SettingsDialog(QDialog):
         self._settings.update(payload)
         self._dirty = False
         self._update_footer_state()
-
-    def _save_and_close(self):
-        self._apply()
-        self.accept()
 
     # ---------- API & file helpers ----------
     def _validate_api_key(self):
@@ -542,9 +569,10 @@ class SettingsDialog(QDialog):
     def _update_targets_hint(self):
         cnt, abspath = self._targets_stats()
         if abspath == "No path" or not os.path.exists(abspath):
-            self.lbl_targets_hint.setText("<span class='bad'>File not found. Click <b>Create</b> or choose an existing JSON.</span>")
+            self.lbl_targets_hint.set_full_text("File not found. Click Create or choose an existing JSON.")
+            self.lbl_targets_hint.setProperty("class", "bad"); self.lbl_targets_hint.style().unpolish(self.lbl_targets_hint); self.lbl_targets_hint.style().polish(self.lbl_targets_hint)
         else:
-            self.lbl_targets_hint.setText(f"<span class='muted'>Path: <code>{abspath}</code> • Contains <b>{cnt}</b> target(s).</span>")
+            self.lbl_targets_hint.set_full_text(f"{abspath} • {cnt} target(s).")
 
     # ---------- cache ----------
     def _cache_info(self) -> Optional[str]:
@@ -555,9 +583,9 @@ class SettingsDialog(QDialog):
             sz = os.path.getsize(p)
             mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
             kb = sz / 1024.0
-            return f"Cache file: <code>{p}</code> • {kb:.1f} KB • modified {mtime}"
+            return f"Cache file: {p} • {kb:.1f} KB • modified {mtime}"
         except Exception:
-            return f"Cache file: <code>{p}</code>"
+            return f"Cache file: {p}"
 
     def _update_cache_info(self):
         info = self._cache_info()

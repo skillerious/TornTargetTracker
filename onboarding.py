@@ -6,8 +6,6 @@ import json
 import re
 from typing import Optional, Callable
 
-import requests
-
 from PyQt6.QtCore import Qt, QUrl, QTimer
 from PyQt6.QtGui import QIcon, QDesktopServices
 from PyQt6.QtWidgets import (
@@ -121,9 +119,7 @@ class OnboardingDialog(QDialog):
         # -------- footer: left checkbox + nav buttons --------
         footer = QWidget(self); f = QHBoxLayout(footer); f.setContentsMargins(0, 0, 0, 0)
         self.chk_hide = QCheckBox("Don’t show on startup")
-        # Invert logic: when unchecked => show_onboarding True (default first run)
         self.chk_hide.setChecked(not bool(self._settings.get("show_onboarding", True)))
-        # Persist immediately when toggled
         self.chk_hide.toggled.connect(self._persist_hide_flag)
         f.addWidget(self.chk_hide, 0, Qt.AlignmentFlag.AlignLeft)
         f.addStretch(1)
@@ -147,8 +143,6 @@ class OnboardingDialog(QDialog):
         root.addWidget(footer)
 
         self._update_buttons()
-
-        # Center after the window is realized
         QTimer.singleShot(0, self._center_over_parent)
 
     # -------------------- pages --------------------
@@ -320,7 +314,6 @@ class OnboardingDialog(QDialog):
         self.btn_back.setEnabled(i > 0)
         self.btn_next.setVisible(i < n - 1)
         self.btn_finish.setVisible(i == n - 1)
-        # Keep Next enabled; we only warn at save/test
         self._maybe_enable_next()
 
     # -------------------- key handling --------------------
@@ -337,15 +330,9 @@ class OnboardingDialog(QDialog):
             pass
 
     def _is_plausible_key(self, key: str) -> bool:
-        # Torn keys are typically 16–64 alnum; keep it permissive to avoid false negatives.
         return bool(key) and bool(re.fullmatch(r"[A-Za-z0-9]{16,64}", key))
 
     def _save_api_key_if_valid(self, prompt_on_empty: bool):
-        """
-        Persists the API key to the SAME settings JSON used by SettingsDialog,
-        ensuring the file & folder exist on first run.
-        """
-        # Ensure backing store is there before saving
         self._ensure_settings_store()
 
         key = self.ed_key.text().strip()
@@ -354,7 +341,6 @@ class OnboardingDialog(QDialog):
                 QMessageBox.information(self, "API key", "You haven't entered an API key yet. You can add it later in Settings.")
             return
         if not self._is_plausible_key(key):
-            # We still save it, but let the user know it looks odd.
             QMessageBox.warning(self, "API key", "This doesn't look like a valid Torn API key.\nYou can still save it and fix later in Settings.")
 
         s = load_settings()
@@ -363,12 +349,10 @@ class OnboardingDialog(QDialog):
         if s.get("api_key") != key:
             s["api_key"] = key
             self._saved_anything = True
-        # Keep the onboarding flag if missing; default to True for first run.
         if "show_onboarding" not in s:
             s["show_onboarding"] = True
             self._saved_anything = True
         save_settings(s)
-        # Also update our in-memory settings for the current session.
         self._settings = s
         if self._saved_anything and self._on_settings_changed:
             try:
@@ -381,7 +365,12 @@ class OnboardingDialog(QDialog):
         if not key:
             QMessageBox.information(self, "Test Key", "Please paste your API key first.")
             return
-        # Probe Torn API (basic)
+        # Lazy import to speed app startup
+        try:
+            import requests
+        except Exception:
+            QMessageBox.information(self, "Test Key", "The 'requests' package isn't installed.")
+            return
         try:
             resp = requests.get(
                 "https://api.torn.com/user/",
@@ -400,9 +389,7 @@ class OnboardingDialog(QDialog):
             QMessageBox.warning(self, "Test Key", f"Torn error [{code}]: {msg}")
             return
 
-        # Success path (show name if available)
         name = data.get("name") if isinstance(data, dict) else None
-        # Persist successful key now (also ensures file exists)
         self._save_api_key_if_valid(prompt_on_empty=False)
         if name:
             QMessageBox.information(self, "Test Key", f"Success! Authenticated as: {name}")
@@ -412,13 +399,6 @@ class OnboardingDialog(QDialog):
     # -------------------- persistence & centering --------------------
 
     def _persist_hide_flag(self, checked: bool):
-        """
-        Checkbox text: 'Don’t show on startup'
-         - checked  => don't show => show_onboarding = False
-         - unchecked => show       => show_onboarding = True
-        Persist immediately so next launch respects the choice.
-        """
-        # Ensure store exists, then persist.
         self._ensure_settings_store()
         show_again = not bool(checked)
         s = load_settings()
@@ -436,7 +416,6 @@ class OnboardingDialog(QDialog):
                     pass
 
     def _center_over_parent(self):
-        """Center over parent if visible; otherwise center on primary screen."""
         try:
             self.adjustSize()
             parent = self.parentWidget()
@@ -450,7 +429,6 @@ class OnboardingDialog(QDialog):
         except Exception:
             pass
 
-    # Ensure persistence even if user closes via Esc / ✖
     def accept(self):
         self._save_api_key_if_valid(prompt_on_empty=False)
         super().accept()
@@ -462,10 +440,6 @@ class OnboardingDialog(QDialog):
     # -------------------- utils --------------------
 
     def _ensure_settings_store(self):
-        """
-        Make sure the AppData directory exists and a settings JSON is initialized,
-        so onboarding can save the key on true first run.
-        """
         try:
             appdir = get_appdata_dir()
             os.makedirs(appdir, exist_ok=True)
@@ -477,7 +451,7 @@ class OnboardingDialog(QDialog):
                 s = {}
             if "show_onboarding" not in s:
                 s["show_onboarding"] = True
-            save_settings(s)  # ensures the file exists
+            save_settings(s)
         except Exception:
             try:
                 save_settings({})
@@ -485,7 +459,6 @@ class OnboardingDialog(QDialog):
                 pass
 
     def _detect_version(self) -> Optional[str]:
-        """Try assets/version.json, version.json, then targets_file JSON for a 'version' key."""
         here = os.path.abspath(os.path.dirname(__file__))
 
         def _from_json(path: str) -> Optional[str]:
@@ -517,14 +490,6 @@ class OnboardingDialog(QDialog):
 # -------------------- public helper --------------------
 
 def maybe_show_onboarding(parent=None, on_settings_changed: Optional[Callable[[dict], None]] = None) -> bool:
-    """
-    Show the onboarding dialog if settings['show_onboarding'] is True.
-    Returns True if the dialog was shown; False otherwise.
-
-    You can pass on_settings_changed(settings_dict) which fires when onboarding
-    persists the API key or the “don’t show again” flag.
-    """
-    # Ensure backing store is present before checking the flag
     try:
         appdir = get_appdata_dir()
         os.makedirs(appdir, exist_ok=True)

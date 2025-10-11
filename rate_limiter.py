@@ -82,6 +82,36 @@ class RateLimiter:
             # sleep outside lock
             self._sleep(wait)
 
+    def acquire_or_stop(self, stop_event: Optional[threading.Event]) -> bool:
+        """
+        Like acquire(), but returns False if stop_event is set while waiting,
+        so callers can abort promptly during shutdown.
+        """
+        while True:
+            now = time.monotonic()
+            with self._lock:
+                if now < self._cooldown_until:
+                    wait = self._cooldown_until - now
+                else:
+                    self._refill_locked(now)
+
+                    if self._tokens >= 1.0:
+                        since_last = now - self._last_call
+                        if self._min_interval > 0 and since_last < self._min_interval:
+                            wait = self._min_interval - since_last
+                        else:
+                            self._tokens -= 1.0
+                            self._last_call = now
+                            return True
+                    else:
+                        rate_per_sec = self._capacity / self._period
+                        deficit = 1.0 - self._tokens
+                        wait = max(0.0, deficit / rate_per_sec)
+
+            if stop_event and stop_event.wait(wait):
+                return False
+            self._sleep(0.0)  # yield
+
     def penalize(self, seconds: float) -> None:
         """
         Enter a global cooldown window for `seconds`. Subsequent acquire()

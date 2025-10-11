@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import threading
 from typing import Any, Dict, Optional
 
 from models import TargetInfo
@@ -29,6 +30,8 @@ class TornAPI:
       - backoff with jitter,
       - Retry-After header support,
       - graceful parsing when selections are missing (limited keys).
+
+    Stop-aware: accepts an optional threading.Event to cancel waits and retries.
     """
 
     BASE = "https://api.torn.com"
@@ -46,38 +49,44 @@ class TornAPI:
         }
 
     # ------------------ public ------------------
-    def fetch_user(self, user_id: int) -> TargetInfo:
+    def fetch_user(self, user_id: int, stop_event: Optional[threading.Event] = None) -> TargetInfo:
         """
-        Fetches a user's info. Retries on 429 and transient conditions with an exponential backoff + global cooldown.
-
-        Returns a populated TargetInfo (with .error on failure).
+        Fetches a user's info. Retries on 429 and transient conditions with an exponential backoff.
+        Returns a populated TargetInfo (with .error on failure). Stops early if stop_event is set.
         """
         uid = int(user_id)
-        # Use both 'basic' and 'profile' when allowed. If 'profile' is not permitted for the key,
-        # Torn will just omit fields — we handle that gracefully.
         selections = "basic,profile"
         qs = urllib.parse.urlencode({"selections": selections, "key": self.api_key})
         url = f"{self.BASE}/user/{uid}?{qs}"
 
-        # Retry policy
-        max_attempts = 8                     # generous to clear transient 429s
-        base_backoff = 0.6                   # seconds
-        max_backoff = 8.0                    # seconds
-        hard_timeout = 30.0                  # per attempt timeout
+        # Retry policy (kept generous, but lower per-attempt timeout for shutdown responsiveness)
+        max_attempts = 8
+        base_backoff = 0.6
+        max_backoff = 8.0
+        hard_timeout = 10.0
+
+        def _cancelled() -> Optional[TargetInfo]:
+            if stop_event and stop_event.is_set():
+                return self._info_with_error(uid, "Cancelled")
+            return None
 
         for attempt in range(1, max_attempts + 1):
-            # global rate limit gate
-            self.limiter.acquire()
+            c = _cancelled()
+            if c:
+                return c
+
+            # global rate limit gate (stop-aware)
+            if not self.limiter.acquire_or_stop(stop_event):
+                return self._info_with_error(uid, "Cancelled")
 
             try:
                 req = urllib.request.Request(url, headers=self._default_headers, method="GET")
                 with self._opener.open(req, timeout=hard_timeout) as resp:
                     code = getattr(resp, "status", 200)
                     payload = resp.read()
-                    # Torn often returns 200 even for logical errors. Parse either way.
                     data = self._parse_json_safely(payload)
 
-                # Torn logical error inside 200? e.g., {"error":{"code":5,"error":"Too many requests..."}}
+                # Torn logical error inside 200?
                 err = self._extract_torn_error(data)
                 if err:
                     code_num, msg = err
@@ -85,9 +94,9 @@ class TornAPI:
                         delay = self._advise_backoff(resp_headers=getattr(resp, "headers", {}), attempt=attempt,
                                                      base=base_backoff, cap=max_backoff)
                         self._apply_penalty(delay, why=f"Torn error {code_num}: {msg}")
-                        self._sleep(delay)
+                        if self._sleep(delay, stop_event):
+                            return self._info_with_error(uid, "Cancelled")
                         continue
-                    # Non-retryable: map to TargetInfo error
                     return self._info_with_error(uid, msg or f"Torn error {code_num}")
 
                 # OK → parse into TargetInfo
@@ -101,7 +110,8 @@ class TornAPI:
                     delay = self._advise_backoff(resp_headers=e.headers, attempt=attempt,
                                                  base=base_backoff, cap=max_backoff, retry_after=retry_after)
                     self._apply_penalty(delay, why=f"HTTP {e.code}")
-                    self._sleep(delay)
+                    if self._sleep(delay, stop_event):
+                        return self._info_with_error(uid, "Cancelled")
                     continue
                 if e.code in (401, 403):
                     return self._info_with_error(uid, "Unauthorized / incorrect API key")
@@ -114,7 +124,8 @@ class TornAPI:
                 # Network flake — retry
                 delay = self._advise_backoff(resp_headers=None, attempt=attempt,
                                              base=base_backoff, cap=max_backoff)
-                self._sleep(delay)
+                if self._sleep(delay, stop_event):
+                    return self._info_with_error(uid, "Cancelled")
                 continue
 
             except Exception as e:
@@ -138,10 +149,8 @@ class TornAPI:
         return None
 
     def _is_retryable_torn_error(self, code: Optional[int], msg: Optional[str]) -> bool:
-        # Torn uses code 5 for "Too many requests". Some keys may see temporary throttles.
         if code == 5:
             return True
-        # generic: retry if message hints at temporary issues
         m = (msg or "").lower()
         if "too many request" in m or "rate limit" in m or "try again later" in m:
             return True
@@ -154,7 +163,6 @@ class TornAPI:
             ra = headers.get("Retry-After")
             if not ra:
                 return None
-            # Retry-After can be seconds or a HTTP date. Torn usually uses seconds.
             return float(ra)
         except Exception:
             return None
@@ -167,32 +175,33 @@ class TornAPI:
         cap: float,
         retry_after: Optional[float] = None,
     ) -> float:
-        # Honor Retry-After if present
         if retry_after is None and resp_headers:
             retry_after = self._parse_retry_after(resp_headers)
 
         if retry_after and retry_after > 0:
-            # small jitter to avoid lock-step stampedes
             return min(cap, retry_after + random.uniform(0.05, 0.25))
 
-        # Exponential backoff with decorrelated jitter (AWS style)
-        # next = min(cap, random( base, prev*3 ))
-        # For simplicity, derive from attempt:
         backoff = base * (2 ** (attempt - 1))
         backoff = min(cap, backoff)
-        # jitter 0..30%
         jitter = backoff * random.uniform(0.0, 0.3)
         return backoff + jitter
 
     def _apply_penalty(self, seconds: float, why: str = "") -> None:
-        # Inform the shared limiter — this will hold *all* threads briefly.
         self.limiter.penalize(seconds)
         if seconds >= 1.0:
             logger.info("Backoff %.2fs due to %s", seconds, why)
 
-    def _sleep(self, seconds: float) -> None:
-        if seconds > 0:
-            time.sleep(seconds)
+    def _sleep(self, seconds: float, stop_event: Optional[threading.Event] = None) -> bool:
+        """
+        Sleeps for up to `seconds`. If stop_event is set during the wait,
+        returns True (caller should treat as 'cancelled').
+        """
+        if seconds <= 0:
+            return False
+        if stop_event:
+            return stop_event.wait(seconds)
+        time.sleep(seconds)
+        return False
 
     # ------------ mapping to TargetInfo ------------
     def _to_target_info(self, uid: int, data: Dict[str, Any]) -> TargetInfo:
@@ -215,12 +224,10 @@ class TornAPI:
         fac = data.get("faction")
         if isinstance(fac, dict):
             fname = fac.get("faction_name") or fac.get("name")
-            # Some keys use 'faction_id' / 'ID'
             fid = fac.get("faction_id") or fac.get("ID") or fac.get("id")
             if fname:
                 faction_name = fname if fid is None else f"{fname} [{fid}]"
 
-        # Build TargetInfo (fields not present are left None)
         info = TargetInfo(
             user_id=uid,
             name=name,
@@ -232,7 +239,6 @@ class TornAPI:
             last_action_relative=last_action_relative,
             faction=faction_name,
         )
-        # Compute 'ok' convenience flag if model uses it
         try:
             info.ok = (str(status_state).lower() == "okay")
         except Exception:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
 from typing import List, Set, Callable, Optional, Dict
 
 from PyQt6.QtCore import QObject, QTimer
@@ -42,6 +43,8 @@ class Controller(QObject):
     Controller with incremental UI updates to prevent table jumping while fetching:
       • View is populated once (from cache), then each fetched row is upserted.
       • Sorting is coalesced in the view; selection & scroll are preserved.
+
+    Shutdown-aware: exposes shutdown() to stop workers and timers on app close.
     """
 
     def __init__(self, view: MainView):
@@ -75,6 +78,9 @@ class Controller(QObject):
         self._done = 0
         self._save_every = int(self.settings.get("save_cache_every", 20))
         self._since_last_save = 0
+
+        # Global shutdown flag for all workers/backoff waits
+        self._shutdown_event = threading.Event()
 
         # Wire view events
         self.view.request_refresh.connect(self.refresh)
@@ -187,7 +193,6 @@ class Controller(QObject):
 
         # --- cache-only startup ---
         if total == 0:
-            # If we have a cache and user wants it at startup, show it.
             cache_items = load_cache() if self.settings.get("load_cache_at_start", True) else []
             if cache_items:
                 logger.info("No targets file, but cache found: showing %d cached row(s).", len(cache_items))
@@ -197,12 +202,10 @@ class Controller(QObject):
                 self.view.set_ignored(self.ignored)
                 self._status(f"No targets file selected. Showing cached {len(self.rows)} row(s).")
                 self._progress(len(self.rows), len(self.rows))
-                # Still offer to load/add targets so a subsequent refresh can fetch live data
                 QTimer.singleShot(0, self._prompt_add_or_load)
                 self._fetcher = None
                 return
 
-            # No targets AND no cache: empty state as before
             self.rows = []
             self._rows_by_id.clear()
             self.view.set_rows([])
@@ -223,7 +226,8 @@ class Controller(QObject):
 
         api = self.api()
         conc = int(self.settings.get("concurrency", 4))
-        self._fetcher = BatchFetcher(api, concurrency=conc)
+        self._shutdown_event.clear()  # new run
+        self._fetcher = BatchFetcher(api, concurrency=conc, stop_event=self._shutdown_event)
         fetcher = self._fetcher
 
         logger.info("BatchFetcher started: concurrency=%d", conc)
@@ -263,7 +267,6 @@ class Controller(QObject):
                 self._since_last_save = 0
 
         def on_done():
-            # No need to push a full reset—proxy sorting handles final order.
             self.view.set_fetching(False)  # final resort + re-enable dynamic sort
             self._status(f"Done • {total} targets • {self._errors} errors")
             self._progress(total, total)
@@ -414,7 +417,6 @@ class Controller(QObject):
         to_remove = set(ids)
         self.rows = [r for r in self.rows if r.user_id not in to_remove]
         self._rows_by_id = {r.user_id: i for i, r in enumerate(self.rows)}
-        # full reset is acceptable here (explicit destructive action)
         self.view.set_rows(self.rows)
         self._current_target_set.difference_update(to_remove)
         self._update_meta(self._done, len(self.rows))
@@ -465,6 +467,19 @@ class Controller(QObject):
             if added:
                 self.add_targets(added)
 
+    # ---------------- Shutdown ----------------
+
+    def shutdown(self):
+        """Stop timers, cancel fetch, and wait briefly so the process can exit cleanly."""
+        try:
+            self._shutdown_event.set()
+            self._auto_timer.stop()
+            if self._fetcher is not None:
+                self._fetcher.stop(wait_ms=2000)
+                self._fetcher = None
+        except Exception:
+            pass
+
 
 # ---------------- main ----------------
 def main():
@@ -485,6 +500,9 @@ def main():
     # Construct controller and attach (avoids circular imports)
     controller = Controller(win.view)
     win.attach_controller(controller)
+
+    # ensure controller shuts down on app quit
+    app.aboutToQuit.connect(controller.shutdown)
 
     # Robust "start maximized" while still remembering size/pos in settings
     try:

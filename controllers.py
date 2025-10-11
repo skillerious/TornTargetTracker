@@ -1,4 +1,3 @@
-# controllers.py
 from __future__ import annotations
 
 import os
@@ -511,6 +510,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         try:
+            # ensure workers/timers stop before closing
+            if self._controller:
+                self._controller.shutdown()
             st = load_settings()
             st["last_size"] = [self.width(), self.height()]
             st["last_pos"] = [self.x(), self.y()]

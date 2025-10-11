@@ -597,69 +597,294 @@ class SettingsDialog(QDialog):
 # ======================================================================
 
 class IgnoreDialog(QDialog):
+    """
+    Modern, compact ignore manager:
+      • Top search bar with clear + search icon
+      • Clean table (striped, compact rows, centered numeric cols)
+      • Button bar with icons + hover states
+      • Context menu + double-click to open profile
+      • Live count pill
+    """
     def __init__(self, ignored: Set[int], infos: List[TargetInfo], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Ignored Targets")
         self.setModal(True)
+        self.resize(760, 520)
+
         self.ignored = set(ignored)
         self.info_map: Dict[int, TargetInfo] = {i.user_id: i for i in infos}
 
-        outer = QVBoxLayout(self)
+        self._apply_styles()
 
-        # Top bar with search
-        top = QWidget(); th = QHBoxLayout(top); th.setContentsMargins(0,0,0,0)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        # ── Header (search + count pill)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
         self.search = QLineEdit(placeholderText="Search name or ID…")
+        self.search.setClearButtonEnabled(True)
+        act_left = self.search.addAction(icon("search"), QLineEdit.ActionPosition.LeadingPosition)
+        act_left.setToolTip("Search")
         self.search.textChanged.connect(self._filter_table)
-        th.addWidget(self.search)
-        outer.addWidget(top)
 
-        # Table
+        self.lbl_count = QLabel("")
+        self.lbl_count.setObjectName("pill")
+        self.lbl_count.setMinimumWidth(120)
+        self.lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        header.addWidget(self.search, 1)
+        header.addSpacing(8)
+        header.addWidget(self.lbl_count, 0, Qt.AlignmentFlag.AlignRight)
+        root.addLayout(header)
+
+        # ── Table
         self.table = QTableWidget(0, 4, self)
+        self.table.setObjectName("targetsTable")
         self.table.setHorizontalHeaderLabels(["Name", "ID", "Level", "Last Seen"])
-        self.table.setSortingEnabled(True)
+        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False)
-        outer.addWidget(self.table)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSortingEnabled(True)
+        self.table.setWordWrap(False)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._menu)
+        self.table.itemDoubleClicked.connect(lambda _=None: self._open_profile_selected())
 
-        # Footer
-        btns = QWidget(); hb = QHBoxLayout(btns); hb.setContentsMargins(0,0,0,0)
-        self.btn_open = QPushButton("Open Profile")
-        self.btn_un = QPushButton("Unignore Selected")
-        self.btn_un_all = QPushButton("Unignore All")
-        hb.addWidget(self.btn_open); hb.addWidget(self.btn_un); hb.addWidget(self.btn_un_all); hb.addStretch(1)
-        self.btn_import = QPushButton("Import…")
-        self.btn_export = QPushButton("Export…")
-        self.btn_close = QPushButton("Close")
-        hb.addWidget(self.btn_import); hb.addWidget(self.btn_export); hb.addWidget(self.btn_close)
-        outer.addWidget(btns)
+        hdr = self.table.horizontalHeader()
+        from PyQt6.QtWidgets import QHeaderView
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)            # Name
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)   # ID
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)   # Level
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)            # Last Seen
+        root.addWidget(self.table, 1)
 
-        self.lbl_count = QLabel()
-        outer.addWidget(self.lbl_count)
+        # ── Footer buttons
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
 
-        # Wire
-        self.btn_open.clicked.connect(self._open_profile_selected)
-        self.btn_un.clicked.connect(self._unignore_selected)
-        self.btn_un_all.clicked.connect(self._unignore_all)
-        self.btn_export.clicked.connect(self._export)
-        self.btn_import.clicked.connect(self._import)
-        self.btn_close.clicked.connect(self.accept)
+        self.btn_open = self._btn("Open Profile", "profile", self._open_profile_selected)
+        self.btn_un = self._btn("Unignore Selected", "unblock", self._unignore_selected, kind="primary")
+        self.btn_un_all = self._btn("Unignore All", "unblock", self._unignore_all, kind="warning")
+        self.btn_import = self._btn("Import…", "import", self._import)
+        self.btn_export = self._btn("Export…", "export", self._export)
+        self.btn_close  = self._btn("Close", None, self.accept)
 
+        btn_row.addWidget(self.btn_open)
+        btn_row.addWidget(self.btn_un)
+        btn_row.addWidget(self.btn_un_all)
+        btn_row.addSpacing(12)
+        btn_row.addWidget(self.btn_import)
+        btn_row.addWidget(self.btn_export)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_close)
+        root.addLayout(btn_row)
+
+        # data
         self._reload_table()
         self._update_count()
+
+        # keyboard conveniences
+        self.search.setFocus()
+        self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    # ───────────────────────── helpers & style ─────────────────────────
+
+    def _btn(self, text: str, ic_name: Optional[str], slot, kind: str = "neutral") -> QPushButton:
+        b = QPushButton(text)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        if ic_name:
+            ic = icon(ic_name)
+            if not ic.isNull():
+                b.setIcon(ic)
+        b.setProperty("kind", kind)  # used by stylesheet
+        b.clicked.connect(slot)
+        return b
+
+    def _apply_styles(self):
+        """
+        Unified dark, compact styling for the Ignore dialog:
+        - rounded search field
+        - modern table + headers + scrollbars
+        - soft, animated buttons with hover/pressed states
+        - colored "Ignored: N" pill (ok/info/warn via dynamic property)
+        """
+        self.setStyleSheet("""
+        /* ---------- Base ---------- */
+        QDialog {
+            background-color: #0f1520;
+            color: #e6eef8;
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 12px;
+        }
+        QLabel, QToolButton { background: transparent; }
+
+        /* ---------- Search ---------- */
+        QLineEdit#search {
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 9px;
+            padding: 6px 10px;
+            background: rgba(255,255,255,0.045);
+            selection-background-color: rgba(77,163,255,0.35);
+        }
+        QLineEdit#search:focus {
+            border-color: rgba(77,163,255,0.55);
+            background: rgba(77,163,255,0.06);
+        }
+
+        /* ---------- Table ---------- */
+        QTableView {
+            background: #111a28;
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 10px;
+            gridline-color: rgba(255,255,255,0.06);
+            selection-background-color: rgba(77,163,255,0.25);
+            selection-color: #eaf3ff;
+            outline: 0;
+        }
+        QTableView::item {
+            padding: 6px 8px;
+        }
+        QTableView::item:selected {
+            background: rgba(77,163,255,0.22);
+        }
+
+        /* Headers */
+        QHeaderView {
+            background: transparent;
+            border: none;
+        }
+        QHeaderView::section {
+            color: #d5e7ff;
+            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                        stop:0 #162234, stop:1 #131d2c);
+            border: none;
+            border-bottom: 1px solid rgba(255,255,255,0.10);
+            border-right: 1px solid rgba(255,255,255,0.06);
+            padding: 6px 8px;
+        }
+        QHeaderView::section:first {
+            border-top-left-radius: 10px;
+        }
+        QHeaderView::section:last {
+            border-top-right-radius: 10px;
+            border-right: none;
+        }
+
+        /* Scrollbars */
+        QScrollBar:vertical, QScrollBar:horizontal {
+            background: transparent;
+            border: none;
+            margin: 0px;
+        }
+        QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+            background: rgba(255,255,255,0.14);
+            border-radius: 6px;
+            min-height: 24px;
+            min-width: 24px;
+        }
+        QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+            background: rgba(77,163,255,0.45);
+        }
+        QScrollBar::add-line, QScrollBar::sub-line,
+        QScrollBar::add-page, QScrollBar::sub-page {
+            background: transparent;
+            border: none;
+        }
+
+        /* ---------- Buttons ---------- */
+        QPushButton {
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            background: rgba(255,255,255,0.04);
+            padding: 6px 12px;
+            min-height: 30px;
+        }
+        QPushButton:hover {
+            background: rgba(77,163,255,0.12);
+            border-color: rgba(77,163,255,0.50);
+        }
+        QPushButton:pressed {
+            background: rgba(77,163,255,0.20);
+        }
+        /* Primary action (give the "Unignore All" or similar a stronger accent by setting objectName to 'primaryBtn') */
+        QPushButton#primaryBtn {
+            border-color: rgba(77,163,255,0.65);
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                        stop:0 rgba(77,163,255,0.18),
+                        stop:1 rgba(77,163,255,0.10));
+        }
+        QPushButton#primaryBtn:hover {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                        stop:0 rgba(77,163,255,0.28),
+                        stop:1 rgba(77,163,255,0.18));
+        }
+        /* Destructive (set objectName to 'dangerBtn' on destructive buttons) */
+        QPushButton#dangerBtn {
+            border-color: rgba(255,95,95,0.55);
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                        stop:0 rgba(255,95,95,0.18),
+                        stop:1 rgba(255,95,95,0.10));
+        }
+        QPushButton#dangerBtn:hover {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                        stop:0 rgba(255,95,95,0.28),
+                        stop:1 rgba(255,95,95,0.18));
+            border-color: rgba(255,95,95,0.75);
+        }
+
+        /* ---------- Footer hint text ---------- */
+        QLabel#footerHint {
+            color: rgba(255,255,255,0.70);
+            padding-left: 2px;
+        }
+
+        /* ---------- Colored pill (Ignored: N) ---------- */
+        QLabel#pill {
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+            min-height: 26px;
+        }
+        QLabel#pill[variant="ok"] {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                        stop:0 rgba(72,199,116,0.18),
+                        stop:1 rgba(72,199,116,0.10));
+            border: 1px solid rgba(72,199,116,0.55);
+            color: #d7ffe6;
+        }
+        QLabel#pill[variant="info"] {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                        stop:0 rgba(77,163,255,0.22),
+                        stop:1 rgba(77,163,255,0.10));
+            border: 1px solid rgba(77,163,255,0.60);
+            color: #e5f1ff;
+        }
+        QLabel#pill[variant="warn"] {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                        stop:0 rgba(255,196,0,0.22),
+                        stop:1 rgba(255,196,0,0.10));
+            border: 1px solid rgba(255,196,0,0.60);
+            color: #fff4d1;
+        }
+        """)
+
+
+    # ───────────────────────── data & filtering ─────────────────────────
 
     def _rows_source(self) -> List[TargetInfo]:
         return [self.info_map.get(uid, TargetInfo(user_id=uid)) for uid in sorted(self.ignored)]
 
     def _reload_table(self):
-        was_sorting = self.table.isSortingEnabled()
         self.table.setSortingEnabled(False)
-
-        data = self._rows_source()
         self.table.setRowCount(0)
-        for inf in data:
+
+        for inf in self._rows_source():
             r = self.table.rowCount()
             self.table.insertRow(r)
 
@@ -672,19 +897,26 @@ class IgnoreDialog(QDialog):
             it_level = QTableWidgetItem(lvl)
             it_last = QTableWidgetItem(last)
 
+            # For numeric sort
             it_id.setData(Qt.ItemDataRole.UserRole, int(inf.user_id))
             it_level.setData(Qt.ItemDataRole.UserRole, int(inf.level) if inf.level is not None else -1)
 
-            f = it_name.font(); f.setItalic(True); it_name.setFont(f)
+            # Visual tweaks
+            f = it_name.font()
+            f.setItalic(True)
+            it_name.setFont(f)
+
+            it_id.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_level.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             self.table.setItem(r, 0, it_name)
             self.table.setItem(r, 1, it_id)
             self.table.setItem(r, 2, it_level)
             self.table.setItem(r, 3, it_last)
 
-        self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setSortingEnabled(was_sorting)
+        # denser rows
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.setSortingEnabled(True)
         self._filter_table(self.search.text())
 
     def _safe_cell_lower(self, row: int, col: int) -> str:
@@ -697,6 +929,7 @@ class IgnoreDialog(QDialog):
             nm = self._safe_cell_lower(r, 0)
             idt = self._safe_cell_lower(r, 1)
             self.table.setRowHidden(r, not (t in nm or t in idt))
+        self._update_count()
 
     def _selected_ids(self) -> List[int]:
         ids: List[int] = []
@@ -706,30 +939,40 @@ class IgnoreDialog(QDialog):
                 ids.append(int(it.text()))
         return ids
 
+    # ───────────────────────── actions ─────────────────────────
+
     def _open_profile_selected(self):
         ids = self._selected_ids()
-        if not ids: return
+        if not ids:
+            return
         QDesktopServices.openUrl(QUrl.fromUserInput(profile_url(ids[0])))
 
     def _unignore_selected(self):
         for uid in self._selected_ids():
             self.ignored.discard(uid)
-        self._reload_table(); self._update_count()
+        self._reload_table()
+        self._update_count()
 
     def _unignore_all(self):
         self.ignored.clear()
-        self._reload_table(); self._update_count()
+        self._reload_table()
+        self._update_count()
 
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export ignored", "ignored.txt", "Text (*.txt)")
-        if not path: return
-        with open(path, "w", encoding="utf-8") as f:
-            for uid in sorted(self.ignored):
-                f.write(f"{uid}\n")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for uid in sorted(self.ignored):
+                    f.write(f"{uid}\n")
+        except Exception:
+            pass
 
     def _import(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import ignored", "", "Text (*.txt);;All Files (*)")
-        if not path: return
+        if not path:
+            return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -739,12 +982,55 @@ class IgnoreDialog(QDialog):
                         self.ignored.add(uid)
                         if uid not in self.info_map:
                             self.info_map[uid] = TargetInfo(user_id=uid)
-            self._reload_table(); self._update_count()
+            self._reload_table()
+            self._update_count()
         except Exception:
             pass
 
     def _update_count(self):
-        self.lbl_count.setText(f"Ignored: {len(self.ignored)} target(s)")
+        n = len(self.ignored)
+        # Choose a variant: green when none ignored, blue normally, amber when many.
+        variant = "ok" if n == 0 else ("warn" if n >= 100 else "info")
+        self.lbl_count.setText(f"Ignored: {n}")
+        # Update dynamic style
+        self.lbl_count.setProperty("variant", variant)
+        self.lbl_count.style().unpolish(self.lbl_count)
+        self.lbl_count.style().polish(self.lbl_count)
+        self.lbl_count.update()
+
+
+    # ───────────────────────── context menu ─────────────────────────
+
+    def _menu(self, pos):
+        idx = self.table.indexAt(pos)
+        menu = QMenu(self)
+
+        if idx.isValid():
+            # ensure row is the selection anchor
+            if not self.table.selectionModel().isSelected(idx):
+                self.table.clearSelection()
+                self.table.selectRow(idx.row())
+
+            r_user = self.table.item(idx.row(), 1)
+            user_id = int(r_user.text()) if r_user and r_user.text().isdigit() else None
+            if user_id is not None:
+                act_open = QAction(icon("profile"), "Open Profile", self)
+                act_open.triggered.connect(self._open_profile_selected)
+                act_un = QAction(icon("unblock"), "Unignore Selected", self)
+                act_un.triggered.connect(self._unignore_selected)
+                act_copy = QAction(icon("copy"), "Copy ID", self)
+                act_copy.triggered.connect(lambda: QApplication.clipboard().setText(str(user_id)))
+
+                menu.addAction(act_open)
+                menu.addAction(act_un)
+                menu.addSeparator()
+                menu.addAction(act_copy)
+                menu.addSeparator()
+
+        menu.addAction(QAction(icon("import"), "Import…", self, triggered=self._import))
+        menu.addAction(QAction(icon("export"), "Export…", self, triggered=self._export))
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
 
 class IgnoredPromptDialog(QDialog):
     def __init__(self, name: str, parent=None, open_what: str = "profile"):

@@ -192,4 +192,4 @@ MIT — see [LICENSE](LICENSE).
 ## 🙏 Acknowledgements & Disclaimer
 - Built by the community for the community — thanks to everyone who contributes ideas and fixes.
 - **Not affiliated with Torn.com**. Be mindful of their API terms and rate limits.
-- All in‑game names and assets belong to their respective owners.s
+- All in‑game names and assets belong to their respective owners.

@@ -1,0 +1,7 @@
+{
+  "api_key": "xWG7HlRywYhHCINw",
+  "concurrency": 4,
+  "req_delay_ms": 350,
+  "auto_refresh_sec": 0,
+  "targets_file": "target.json"
+}

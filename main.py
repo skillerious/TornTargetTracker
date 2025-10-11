@@ -185,7 +185,24 @@ class Controller(QObject):
         self._current_target_set = set(ids)
         total = len(ids)
 
+        # --- cache-only startup ---
         if total == 0:
+            # If we have a cache and user wants it at startup, show it.
+            cache_items = load_cache() if self.settings.get("load_cache_at_start", True) else []
+            if cache_items:
+                logger.info("No targets file, but cache found: showing %d cached row(s).", len(cache_items))
+                self.rows = list(cache_items)
+                self._rows_by_id = {r.user_id: i for i, r in enumerate(self.rows)}
+                self.view.set_rows(self.rows)
+                self.view.set_ignored(self.ignored)
+                self._status(f"No targets file selected. Showing cached {len(self.rows)} row(s).")
+                self._progress(len(self.rows), len(self.rows))
+                # Still offer to load/add targets so a subsequent refresh can fetch live data
+                QTimer.singleShot(0, self._prompt_add_or_load)
+                self._fetcher = None
+                return
+
+            # No targets AND no cache: empty state as before
             self.rows = []
             self._rows_by_id.clear()
             self.view.set_rows([])

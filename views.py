@@ -1,22 +1,49 @@
 from __future__ import annotations
 import os
 import re
-from typing import List, Set, Dict, Optional
+import sys
+import json
+import threading
+import logging
+from typing import List, Set, Dict, Optional, Tuple
+
+import requests
 
 from PyQt6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QVariant, QSortFilterProxyModel,
-    pyqtSignal, QUrl, QSize, QTimer, QItemSelectionModel, QEvent
+    pyqtSignal, QUrl, QSize, QTimer, QItemSelectionModel, QDateTime
 )
-from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QFont, QCursor
+from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QFont, QPixmap, QPainter, QPen, QBrush, QColor, QIcon
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableView, QLineEdit, QToolBar, QCheckBox,
     QPushButton, QMenu, QFileDialog, QDialog, QFormLayout, QSpinBox, QLabel,
     QGroupBox, QTextBrowser, QListWidgetItem, QListWidget, QTableWidget,
-    QTableWidgetItem, QFrame, QToolButton, QComboBox, QTabWidget, QStyle, QHeaderView
+    QTableWidgetItem, QFrame, QToolButton, QComboBox, QTabWidget, QStyle, QHeaderView, QApplication, QSizePolicy
 )
 
 from models import TargetInfo
 from storage import get_appdata_dir
+
+# -----------------------------------------------------------------------------
+# Logging (verbose for update checks)
+# -----------------------------------------------------------------------------
+log = logging.getLogger("TargetTracker.Views")
+if not log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+    log.addHandler(_h)
+    log.setLevel(logging.INFO)
+
+about_log = logging.getLogger("TargetTracker.About")
+if not about_log.handlers:
+    _h2 = logging.StreamHandler()
+    _h2.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+    about_log.addHandler(_h2)
+    about_log.setLevel(logging.INFO)
+
+# Optional GitHub token for higher rate limits (Fine-grained PAT → Contents: Read-only)
+# NOTE: You asked to hardcode this token. It’s embedded below exactly as provided.
+GITHUB_TOKEN = "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"
 
 COLUMNS = ["Name", "ID", "Level", "Status", "Details", "Until", "Faction", "Last Action", "Error"]
 
@@ -27,13 +54,21 @@ def profile_url(uid: int) -> str:
 def attack_url(uid: int) -> str:
     return f"https://www.torn.com/loader.php?sid=attack&user2ID={int(uid)}"
 
-# ---------- assets helpers ----------
+# ---------- PyInstaller-safe assets ----------
+def asset_path(rel: str) -> str:
+    """
+    Resolve a resource path for dev and PyInstaller (onefile) builds.
+    """
+    base = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
+    cand = os.path.join(base, rel)
+    return cand if os.path.exists(cand) else rel
+
 def _icon_path(name: str) -> Optional[str]:
     for p in (
-        os.path.join("assets", f"ic-{name}.svg"),
-        os.path.join("assets", f"ic-{name}.png"),
-        f"ic-{name}.svg",
-        f"ic-{name}.png",
+        asset_path(os.path.join("assets", f"ic-{name}.svg")),
+        asset_path(os.path.join("assets", f"ic-{name}.png")),
+        asset_path(f"ic-{name}.svg"),
+        asset_path(f"ic-{name}.png"),
     ):
         if os.path.exists(p):
             return p
@@ -42,6 +77,10 @@ def _icon_path(name: str) -> Optional[str]:
 def icon(name: str) -> QIcon:
     p = _icon_path(name)
     return QIcon(p) if p else QIcon()
+
+# ======================================================================
+#                               MODEL
+# ======================================================================
 
 class TargetsModel(QAbstractTableModel):
     def __init__(self):
@@ -66,7 +105,6 @@ class TargetsModel(QAbstractTableModel):
 
         s = text.strip().lower()
 
-        # status-like phrases
         if "online" in s:
             return 0
         if "idle" in s:
@@ -76,7 +114,6 @@ class TargetsModel(QAbstractTableModel):
         if s in {"—", "-", "unknown", "n/a"}:
             return 10**9
 
-        # normalize units & remove "ago" / commas
         s = s.replace("ago", " ").replace(",", " ")
         repl = {
             "minutes": "m", "minute": "m", "mins": "m", "min": "m", "m ": "m ",
@@ -88,9 +125,8 @@ class TargetsModel(QAbstractTableModel):
         for k, v in repl.items():
             s = s.replace(k, v)
 
-        import re as _re
         total = 0
-        for val, unit in _re.findall(r"(\d+)\s*([wdhms])", s):
+        for val, unit in re.findall(r"(\d+)\s*([wdhms])", s):
             n = int(val)
             if unit == "w": total += n * 7 * 24 * 3600
             elif unit == "d": total += n * 24 * 3600
@@ -100,7 +136,6 @@ class TargetsModel(QAbstractTableModel):
         if total > 0:
             return total
 
-        # fallback: number => minutes
         try:
             return int(s) * 60
         except Exception:
@@ -122,132 +157,6 @@ class TargetsModel(QAbstractTableModel):
         self._rows = list(rows or [])
         self._idx_by_uid = {r.user_id: i for i, r in enumerate(self._rows)}
         self.endResetModel()
-
-    def upsert(self, info: TargetInfo):
-        """Insert or replace a single row and emit fine-grained signals."""
-        uid = int(info.user_id)
-        idx = self._idx_by_uid.get(uid)
-        if idx is None:
-            row = len(self._rows)
-            self.beginInsertRows(QModelIndex(), row, row)
-            self._rows.append(info)
-            self._idx_by_uid[uid] = row
-            self.endInsertRows()
-        else:
-            self._rows[idx] = info
-            tl = self.index(idx, 0)
-            br = self.index(idx, self.columnCount() - 1)
-            self.dataChanged.emit(tl, br, [
-                Qt.ItemDataRole.DisplayRole,
-                Qt.ItemDataRole.DecorationRole,
-                Qt.ItemDataRole.ForegroundRole,
-                Qt.ItemDataRole.FontRole,
-                Qt.ItemDataRole.UserRole,       # important for proxy resort
-                Qt.ItemDataRole.ToolTipRole,
-            ])
-
-    def set_ignored(self, ids: Set[int]):
-        self._ignored = set(ids)
-        if self._rows:
-            tl = self.index(0, 0)
-            br = self.index(max(0, len(self._rows)-1), self.columnCount()-1)
-            self.dataChanged.emit(tl, br, [
-                Qt.ItemDataRole.DecorationRole,
-                Qt.ItemDataRole.DisplayRole,
-                Qt.ItemDataRole.ForegroundRole,
-                Qt.ItemDataRole.FontRole,
-                Qt.ItemDataRole.UserRole
-            ])
-
-    def rowCount(self, parent=QModelIndex()) -> int:
-        return len(self._rows)
-
-    def columnCount(self, parent=QModelIndex()) -> int:
-        return len(COLUMNS)
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return COLUMNS[section]
-        return QVariant()
-
-    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return QVariant()
-        r = self._rows[index.row()]
-        c = index.column()
-
-        # Sort role (used by proxy)
-        if role == Qt.ItemDataRole.UserRole:
-            if c == 0: return (r.name or "").lower()
-            if c == 1: return int(r.user_id)
-            if c == 2: return int(r.level) if r.level is not None else -1
-            if c == 3: return self._status_rank(r.status_chip())
-            if c == 4: return (r.status_desc or "").lower()
-            if c == 5: return int(r.status_until) if r.status_until else 0
-            if c == 6: return (r.faction or "").lower()
-            if c == 7:
-                rel = r.last_action_relative or r.last_action_status or ""
-                return self._relative_to_seconds(rel)
-            if c == 8: return (r.error or "")
-            return ""
-
-        # icon marker for ignored
-        if role == Qt.ItemDataRole.DecorationRole and c == 0 and r.user_id in self._ignored:
-            return icon("block-red")
-
-        # dim + italic for ignored
-        if role == Qt.ItemDataRole.ForegroundRole and r.user_id in self._ignored:
-            from PyQt6.QtGui import QBrush, QColor
-            return QBrush(QColor(150, 150, 150))
-        if role == Qt.ItemDataRole.FontRole and r.user_id in self._ignored:
-            f = QFont(); f.setItalic(True); return f
-
-        # display text
-        if role == Qt.ItemDataRole.DisplayRole:
-            dash = "—"
-            if c == 0: return r.name or dash
-            if c == 1: return str(r.user_id)
-            if c == 2: return dash if r.level is None else str(r.level)
-            if c == 3: return r.status_chip() or dash
-            if c == 4: return r.status_desc or dash
-            if c == 5: return r.until_human() or dash
-            if c == 6: return r.faction or dash
-            if c == 7: return (r.last_action_relative or r.last_action_status) or dash
-            if c == 8: return r.error or ""
-
-        # status colors (non-ignored rows)
-        if role == Qt.ItemDataRole.ForegroundRole and r.user_id not in self._ignored:
-            s = (r.status_chip()).lower()
-            from PyQt6.QtGui import QBrush, QColor
-            if "okay" in s:
-                return QBrush(QColor(120, 200, 120))
-            if "hospital" in s or "jail" in s or "federal" in s:
-                return QBrush(QColor(220, 140, 140))
-
-        # numeric alignment
-        if role == Qt.ItemDataRole.TextAlignmentRole and c in (1, 2, 5):
-            return Qt.AlignmentFlag.AlignCenter
-
-        # tooltip
-        if role == Qt.ItemDataRole.ToolTipRole:
-            tip = [
-                f"<b>{r.name or '—'}</b> [{r.user_id}]",
-                f"Level: {r.level if r.level is not None else '—'}",
-                f"Status: {r.status_chip() or '—'} — {r.status_desc or '—'}",
-                f"Until: {r.until_human() or '—'}",
-                f"Faction: {r.faction or '—'}",
-                f"Last Action: {(r.last_action_relative or r.last_action_status) or '—'}",
-            ]
-            if r.error: tip.append(f"<b>Error:</b> {r.error}")
-            if r.user_id in self._ignored: tip.append("<b>Ignored:</b> Yes")
-            return "<br>".join(tip)
-
-        return QVariant()
-
-    def row(self, idx: int) -> TargetInfo:
-        return self._rows[idx]
-
-
 
     def upsert(self, info: TargetInfo):
         """Insert or replace a single row and emit fine-grained signals."""
@@ -296,15 +205,6 @@ class TargetsModel(QAbstractTableModel):
             return COLUMNS[section]
         return QVariant()
 
-    def _status_rank(self, chip: str) -> int:
-        c = (chip or "").lower()
-        if "okay" in c: return 0
-        if "hospital" in c: return 1
-        if "jail" in c and "federal" in c: return 2
-        if "jail" in c: return 3
-        if "travel" in c: return 4
-        return 5
-
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return QVariant()
@@ -320,11 +220,11 @@ class TargetsModel(QAbstractTableModel):
             if c == 4: return (r.status_desc or "").lower()
             if c == 5: return int(r.status_until) if r.status_until else 0
             if c == 6: return (r.faction or "").lower()
-            if c == 7:  # numeric: seconds since last action (smaller = more recent)
-                return self._relative_to_seconds(r.last_action_relative or r.last_action_status or "")
+            if c == 7:
+                rel = r.last_action_relative or r.last_action_status or ""
+                return self._relative_to_seconds(rel)
             if c == 8: return (r.error or "")
             return ""
-
 
         # icon for ignored
         if role == Qt.ItemDataRole.DecorationRole and c == 0 and r.user_id in self._ignored:
@@ -376,9 +276,13 @@ class TargetsModel(QAbstractTableModel):
             return "<br>".join(tip)
         return QVariant()
 
-    def row(self, idx: int) -> TargetInfo: return self._rows[idx]
+    def row(self, idx: int) -> TargetInfo:
+        return self._rows[idx]
 
-# ---------- smarter search bar ----------
+# ======================================================================
+#                           SEARCH BAR
+# ======================================================================
+
 class SearchBar(QWidget):
     """
     Debounced search with scope, regex and case toggles.
@@ -449,7 +353,10 @@ class SearchBar(QWidget):
         }
         self.queryChanged.emit(q)
 
-# ---------- filter ----------
+# ======================================================================
+#                           FILTER PROXY
+# ======================================================================
+
 class FilterProxy(QSortFilterProxyModel):
     def __init__(self):
         super().__init__()
@@ -535,7 +442,10 @@ class FilterProxy(QSortFilterProxyModel):
         if ("travel" in chip and not self.show_traveling): return False
         return True
 
-# ---------- dialogs ----------
+# ======================================================================
+#                           SETTINGS DIALOG
+# ======================================================================
+
 class SettingsDialog(QDialog):
     saved = pyqtSignal(dict)
 
@@ -570,7 +480,7 @@ class SettingsDialog(QDialog):
         self.lbl_appdata = QLabel(get_appdata_dir())
         self.lbl_appdata.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         btn_open_appdata = QPushButton("Open Folder"); btn_open_appdata.clicked.connect(self._open_appdata)
-        row_app = QWidget(); hb3 = QHBoxLayout(row_app); hb3.setContentsMargins(0,0,0,0)
+        row_app = QWidget(); hb3 = QHBoxLayout(row_app); hb3.setContentsMargins(0, 0, 0, 0)
         hb3.addWidget(self.lbl_appdata, 1); hb3.addWidget(btn_open_appdata)
 
         self.chk_load_cache = QCheckBox("Load cache at startup")
@@ -681,6 +591,10 @@ class SettingsDialog(QDialog):
             return bool(cb.isChecked())
         except Exception:
             return False
+
+# ======================================================================
+#                           IGNORE DIALOGS
+# ======================================================================
 
 class IgnoreDialog(QDialog):
     def __init__(self, ignored: Set[int], infos: List[TargetInfo], parent=None):
@@ -795,7 +709,7 @@ class IgnoreDialog(QDialog):
     def _open_profile_selected(self):
         ids = self._selected_ids()
         if not ids: return
-        QDesktopServices.openUrl(QUrl(profile_url(ids[0])))
+        QDesktopServices.openUrl(QUrl.fromUserInput(profile_url(ids[0])))
 
     def _unignore_selected(self):
         for uid in self._selected_ids():
@@ -862,20 +776,57 @@ class IgnoredPromptDialog(QDialog):
         self.btn_open_once.clicked.connect(lambda: (setattr(self, "result_choice", "open_once"), self.accept()))
         self.btn_cancel.clicked.connect(self.reject)
 
-# ---------- About dialog ----------
+# ======================================================================
+#                            ABOUT DIALOG
+# ======================================================================
+
 class AboutDialog(QDialog):
+    """
+    Transparent header, crisp logo (ICO preferred), robust GitHub version check.
+    When a newer version is found, shows a green outline pill (transparent inside)
+    and enables 'Release Notes'. Uses a queued signal to update the UI reliably.
+    """
+
+    updateFound = pyqtSignal(str)  # emitted from worker thread → handled in UI thread
+
+    GITHUB_RAW = "https://raw.githubusercontent.com/skillerious/TornTargetTracker/main/assets/version.json"
+    GITHUB_API = "https://api.github.com/repos/skillerious/TornTargetTracker/contents/assets/version.json"
+    GITHUB_RAW_FALLBACK = "https://github.com/skillerious/TornTargetTracker/raw/main/assets/version.json"
+    GITHUB_BLOB_PAGE = "https://github.com/skillerious/TornTargetTracker/blob/main/assets/version.json"
+    RELEASES_URL = "https://github.com/skillerious/TornTargetTracker/releases"
+
+    # Optional: env var (or hardcode if you insist). Keep read-only!
+    GITHUB_TOKEN = os.environ.get("TTT_GITHUB_TOKEN", "").strip()
+
     def __init__(self, parent=None, app_name: str = "Target Tracker", app_version: Optional[str] = None):
         super().__init__(parent)
         self.setWindowTitle(f"About {app_name}")
         self.setModal(True)
         self.setMinimumWidth(580)
 
+        # ---------- logging ----------
+        import logging
+        self._log = logging.getLogger("TargetTracker.About")
+        if not self._log.handlers:
+            h = logging.StreamHandler()
+            h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+            self._log.addHandler(h)
+            self._log.setLevel(logging.INFO)
+
+        # ---------- runtime info ----------
         import sys, json
         from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR
 
+        self.app_name = app_name
+        self.py_ver = sys.version.split(" ")[0]
+        self.pyqt_ver = PYQT_VERSION_STR
+        self.qt_ver = QT_VERSION_STR
+
+        # ---------- helpers ----------
         def _json_version_from(path: str) -> Optional[str]:
             try:
-                if not os.path.exists(path): return None
+                if not os.path.exists(path):
+                    return None
                 with open(path, "r", encoding="utf-8") as f:
                     obj = json.load(f)
                 v = obj.get("version")
@@ -883,53 +834,140 @@ class AboutDialog(QDialog):
             except Exception:
                 return None
 
-        def _detect_version() -> str:
+        def _detect_local_version() -> str:
             here = os.path.abspath(os.path.dirname(__file__))
-            for p in (os.path.join(here, "assets", "version.json"),
-                      os.path.join(here, "version.json"),
-                      os.path.join(get_appdata_dir(), "version.json")):
+            for p in (
+                os.path.join(here, "assets", "version.json"),
+                os.path.join(here, "version.json"),
+                os.path.join(get_appdata_dir(), "version.json"),
+            ):
                 v = _json_version_from(p)
-                if v: return v
+                if v:
+                    return v
             try:
                 from storage import load_settings
-                st = load_settings(); tf = st.get("targets_file")
+                st = load_settings()
+                tf = st.get("targets_file")
                 if tf and os.path.exists(tf):
                     v = _json_version_from(tf)
-                    if v: return v
+                    if v:
+                        return v
             except Exception:
                 pass
-            return "—"
+            return app_version or "—"
 
-        ver_text = app_version or _detect_version()
-        py_ver = sys.version.split(" ")[0]
-        pyqt_ver = PYQT_VERSION_STR; qt_ver = QT_VERSION_STR
+        def _parse_version(s: str) -> tuple:
+            if not s:
+                return ()
+            s = s.strip().lower()
+            if s.startswith("v"):
+                s = s[1:]
+            cleaned = "".join(ch for ch in s if ch.isdigit() or ch == ".")
+            parts = [p for p in cleaned.split(".") if p]
+            nums = []
+            for p in parts[:4]:
+                try:
+                    nums.append(int(p))
+                except Exception:
+                    nums.append(0)
+            while len(nums) < 3:
+                nums.append(0)
+            return tuple(nums)
 
-        header = QWidget(self)
-        header.setObjectName("aboutHeader")
-        header.setStyleSheet("""
+        def _is_newer(remote: str, local: str) -> bool:
+            r, l = _parse_version(remote), _parse_version(local)
+            newer = r > l
+            self._log.info("Compare versions: remote=%s parsed=%s  local=%s parsed=%s  -> newer=%s",
+                           remote, r, local, l, newer)
+            return newer
+
+        self.local_version = _detect_local_version()
+        self._log.info("About opened: local_version=%s Python=%s PyQt=%s Qt=%s",
+                       self.local_version, self.py_ver, self.pyqt_ver, self.qt_ver)
+
+        # ---------- header (transparent) ----------
+        self.header = QWidget(self)
+        self.header.setObjectName("aboutHeader")
+        self.header.setStyleSheet("""
             #aboutHeader { background: transparent; }
             QLabel#verBadge {
                 color:#bcd6ff; border:1px solid #3d5371; border-radius:10px;
                 padding:2px 8px; font-size:12px; background: transparent;
             }
+            QWidget#pill {
+                background: transparent;               /* fully transparent interior */
+                border: 1px solid rgba(46,125,50,0.85);/* green outline */
+                border-radius: 11px;
+            }
+            QLabel#pillText { color:#d7ffe3; font-size:12px; background: transparent; }
         """)
-        h = QHBoxLayout(header); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(12)
+        h = QHBoxLayout(self.header)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(12)
 
-        ico_path = _icon_path("app")
-        if ico_path:
-            icon_lbl = QLabel()
-            icon_lbl.setPixmap(QIcon(ico_path).pixmap(64, 64))
-            h.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+        # crisp logo: prefer ICO, then PNG
+        pm_logo = QPixmap()
+        ico_path = asset_path(os.path.join("assets", "logo.ico"))
+        png_path = asset_path(os.path.join("assets", "logo.png"))
+        logo_used = None
+        if os.path.exists(ico_path):
+            ic = QIcon(ico_path)
+            pm_logo = ic.pixmap(QSize(64, 64))
+            if pm_logo.isNull():
+                pm_logo = QPixmap(ico_path)
+            logo_used = ico_path
+        elif os.path.exists(png_path):
+            pm_logo = QPixmap(png_path)
+            logo_used = png_path
 
+        logo_label = QLabel()
+        if not pm_logo.isNull():
+            pm_logo = pm_logo.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
+                                     Qt.TransformationMode.SmoothTransformation)
+            logo_label.setPixmap(pm_logo)
+            h.addWidget(logo_label, 0, Qt.AlignmentFlag.AlignTop)
+        self._log.info("About logo: using %s", logo_used or "none")
+
+        # title
         title_box = QVBoxLayout(); title_box.setSpacing(2)
-        lbl_title = QLabel(f"<span style='font-size:20px; font-weight:600;'>{app_name}</span>")
-        lbl_sub = QLabel("A Torn.com target list viewer"); lbl_sub.setStyleSheet("color:#b8c0cc;")
-        title_box.addWidget(lbl_title); title_box.addWidget(lbl_sub)
+        self.lbl_title = QLabel(f"<span style='font-size:20px; font-weight:600;'>{app_name}</span>")
+        self.lbl_sub = QLabel("A Torn.com target list viewer")
+        self.lbl_sub.setStyleSheet("color:#b8c0cc;")
+        title_box.addWidget(self.lbl_title); title_box.addWidget(self.lbl_sub)
         h.addLayout(title_box, 1); h.addStretch(1)
 
-        ver_badge = QLabel(f"Version {ver_text}"); ver_badge.setObjectName("verBadge")
-        h.addWidget(ver_badge, 0, Qt.AlignmentFlag.AlignTop)
+        # simple version badge (no update suffix)
+        self.ver_badge = QLabel(f"Version {self.local_version}")
+        self.ver_badge.setObjectName("verBadge")
+        h.addWidget(self.ver_badge, 0, Qt.AlignmentFlag.AlignTop)
 
+        # green pill (transparent interior)
+        def _green_dot_pm(sz=12):
+            pm = QPixmap(sz, sz); pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            color = QColor(72, 187, 120)
+            p.setBrush(QBrush(color)); p.setPen(QPen(color, 1))
+            r = sz - 2; p.drawEllipse(1, 1, r, r); p.end()
+            return pm
+
+        self.update_pill = QWidget()
+        self.update_pill.setObjectName("pill")
+        self.update_pill.setAutoFillBackground(False)
+        self.update_pill.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        pill_l = QHBoxLayout(self.update_pill)
+        pill_l.setContentsMargins(10, 3, 10, 3)
+        pill_l.setSpacing(6)
+
+        pill_icon = QLabel(); pill_icon.setPixmap(_green_dot_pm(14))
+        self._pill_text = QLabel("Update available")
+        self._pill_text.setObjectName("pillText")
+        self._pill_text.setWordWrap(False)
+
+        pill_l.addWidget(pill_icon); pill_l.addWidget(self._pill_text)
+        self.update_pill.setVisible(False)
+        h.addWidget(self.update_pill, 0, Qt.AlignmentFlag.AlignTop)
+
+        # ---------- body ----------
         info = QTextBrowser(self)
         info.setOpenExternalLinks(True)
         info.setStyleSheet("QTextBrowser { border: none; }")
@@ -947,14 +985,14 @@ class AboutDialog(QDialog):
             with cached startup, filters, and an ignore list.</p>
 
             <table>
-            <tr><td class="k">Developer</td>
-                <td>Skillerious — <a href="https://github.com/skillerious">GitHub</a></td></tr>
-            <tr><td class="k">Torn Profile</td>
-                <td><a href="https://www.torn.com/profiles.php?XID=3212954">Open</a></td></tr>
-            <tr><td class="k">Environment</td>
-                <td>Python {py_ver} • PyQt {pyqt_ver} • Qt {qt_ver}</td></tr>
-            <tr><td class="k">Libraries</td>
-                <td><a href="https://qdarkstylesheet.readthedocs.io">QDarkStyle</a>, PyQt6</td></tr>
+              <tr><td class="k">Developer</td>
+                  <td>Skillerious — <a href="https://github.com/skillerious">GitHub</a></td></tr>
+              <tr><td class="k">Torn Profile</td>
+                  <td><a href="https://www.torn.com/profiles.php?XID=3212954">Open</a></td></tr>
+              <tr><td class="k">Environment</td>
+                  <td>Python {self.py_ver} • PyQt {self.pyqt_ver} • Qt {self.qt_ver}</td></tr>
+              <tr><td class="k">Libraries</td>
+                  <td><a href="https://qdarkstylesheet.readthedocs.io">QDarkStyle</a>, PyQt6</td></tr>
             </table>
 
             <p class="muted" style="margin-top:10px;">
@@ -963,12 +1001,9 @@ class AboutDialog(QDialog):
             </p>
         """)
 
-
         sep = QFrame(self); sep.setFrameShape(QFrame.Shape.HLine); sep.setFrameShadow(QFrame.Shadow.Sunken)
 
-        btns = QHBoxLayout(); btns.setContentsMargins(0, 0, 0, 0); btns.setSpacing(8)
-        btns.addStretch(1)
-
+        # ---------- footer ----------
         def _btn(text: str, icon_name: Optional[str], url: Optional[str]):
             b = QPushButton(text)
             if icon_name: b.setIcon(icon(icon_name))
@@ -978,26 +1013,151 @@ class AboutDialog(QDialog):
         btn_github = _btn("GitHub", "github", "https://github.com/skillerious")
         btn_torn   = _btn("Torn Profile", "link", "https://www.torn.com/profiles.php?XID=3212954")
 
+        self.btn_release = _btn("Release Notes", "update", self.RELEASES_URL)
+        self.btn_release.setVisible(False)
+
         copy_btn = QPushButton("Copy Diagnostics")
         def _copy_diag():
             try:
-                from PyQt6.QtWidgets import QApplication
-                QApplication.clipboard().setText(f"{app_name} {ver_text}  |  Python {py_ver}  •  PyQt {pyqt_ver}  •  Qt {qt_ver}")
-            except Exception: pass
+                QApplication.clipboard().setText(
+                    f"{app_name} {self.local_version}  |  Python {self.py_ver}  •  PyQt {self.pyqt_ver}  •  Qt {self.qt_ver}"
+                )
+            except Exception:
+                pass
         copy_btn.clicked.connect(_copy_diag)
 
         close_btn = QPushButton("Close"); close_btn.clicked.connect(self.accept)
-        for b in (btn_github, btn_torn, copy_btn, close_btn): btns.addWidget(b)
 
+        btns = QHBoxLayout(); btns.setContentsMargins(0, 0, 0, 0); btns.setSpacing(8)
+        btns.addStretch(1)
+        for b in (btn_github, btn_torn, self.btn_release, copy_btn, close_btn): btns.addWidget(b)
+
+        # ---------- root layout ----------
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(12)
-        root.addWidget(header)
-        root.addWidget(info)
-        root.addWidget(sep)
-        root.addLayout(btns)
+        root.setContentsMargins(14, 14, 14, 14); root.setSpacing(12)
+        root.addWidget(self.header); root.addWidget(info); root.addWidget(sep); root.addLayout(btns)
 
-# ---------- styled toolbar ----------
+        # Connect the queued signal for reliable UI updates
+        self.updateFound.connect(self._apply_update_visuals)
+
+        # start async update check
+        QTimer.singleShot(0, lambda: self._check_for_update(_is_newer))
+
+    # ---------- update logic ----------
+    def _check_for_update(self, is_newer_fn):
+        import threading, json, base64, re, time
+        import requests
+
+        headers = {
+            "User-Agent": f"{self.app_name}-AboutDialog",
+            "Accept": "application/vnd.github+json",
+        }
+        if self.GITHUB_TOKEN:
+            headers["Authorization"] = f"Bearer {self.GITHUB_TOKEN}"
+            self._log.info("GitHub token enabled (len=%d)", len(self.GITHUB_TOKEN))
+
+        def _fetch_remote_version() -> Optional[str]:
+            # 1) RAW (cache-busted)
+            try:
+                url = f"{self.GITHUB_RAW}?_ts={int(time.time())}"
+                self._log.info("Fetch RAW: %s", url)
+                r = requests.get(url, headers=headers, timeout=5)
+                self._log.info("RAW status=%s len=%s", r.status_code, len(r.text or ""))
+                if r.ok and r.text:
+                    obj = r.json()
+                    v = obj.get("version")
+                    if v: return str(v).strip()
+            except Exception as e:
+                self._log.info("RAW fetch err: %s", e)
+
+            # 2) Contents API
+            try:
+                self._log.info("Fetch API: %s", self.GITHUB_API)
+                r = requests.get(self.GITHUB_API, headers=headers, timeout=6)
+                self._log.info("API status=%s", r.status_code)
+                if r.ok:
+                    data = r.json()
+                    if isinstance(data, dict) and "content" in data:
+                        raw = base64.b64decode(data["content"]).decode("utf-8", errors="ignore")
+                        obj = json.loads(raw)
+                        v = obj.get("version")
+                        if v: return str(v).strip()
+            except Exception as e:
+                self._log.info("API fetch err: %s", e)
+
+            # 3) RAW fallback
+            try:
+                self._log.info("Fetch RAW Fallback: %s", self.GITHUB_RAW_FALLBACK)
+                r = requests.get(self.GITHUB_RAW_FALLBACK, headers=headers, timeout=6, allow_redirects=True)
+                self._log.info("RAW Fallback status=%s", r.status_code)
+                if r.ok and r.text:
+                    obj = r.json()
+                    v = obj.get("version")
+                    if v: return str(v).strip()
+            except Exception as e:
+                self._log.info("RAW fallback err: %s", e)
+
+            # 4) Parse blob page
+            try:
+                self._log.info("Fetch BLOB page: %s", self.GITHUB_BLOB_PAGE)
+                r = requests.get(self.GITHUB_BLOB_PAGE, headers=headers, timeout=7)
+                self._log.info("BLOB status=%s len=%s", r.status_code, len(r.text or ""))
+                if r.ok and r.text:
+                    m = re.search(r'\"version\"\s*:\s*\"([0-9][^\"]+)\"', r.text)
+                    if m: return m.group(1).strip()
+            except Exception as e:
+                self._log.info("BLOB parse err: %s", e)
+
+            return None
+
+        def _worker():
+            remote = _fetch_remote_version()
+            self._log.info("Remote version fetched: %r (local=%r)", remote, self.local_version)
+            if not remote:
+                return
+            try:
+                if is_newer_fn(remote, self.local_version):
+                    self._log.info("Newer version detected -> emitting signal")
+                    self.updateFound.emit(remote)  # queued across threads
+                else:
+                    self._log.info("No update available")
+            except Exception as e:
+                self._log.info("Version compare failed: %s", e)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_update_visuals(self, remote_version: str):
+        """UI-thread: show transparent green pill and enable Release Notes."""
+        try:
+            text = f"Update {remote_version} available"
+            self._pill_text.setText(text)
+
+            # ensure 'available' never clips
+            fm = self._pill_text.fontMetrics()
+            min_w = fm.horizontalAdvance(text) + 28  # text + icon + paddings
+            self.update_pill.setMinimumWidth(min_w)
+            self.update_pill.adjustSize()
+            self.update_pill.setVisible(True)
+
+            self.btn_release.setVisible(True)
+
+            # refresh layout immediately
+            self.header.layout().invalidate()
+            self.header.adjustSize()
+            self.update_pill.repaint()
+            self.repaint()
+
+            self._log.info("Update UI applied (pill shown, min_w=%d).", min_w)
+        except Exception as e:
+            self._log.info("Apply update visuals failed: %s", e)
+
+
+
+
+# ======================================================================
+#                           TOOLBAR + MAIN VIEW
+# ======================================================================
+
 class StyledToolBar(QToolBar):
     def __init__(self):
         super().__init__()
@@ -1012,7 +1172,6 @@ class StyledToolBar(QToolBar):
             QToolBar::separator { background: rgba(255,255,255,0.10); width: 1px; margin: 6px 4px; }
         """)
 
-# ---------- main view ----------
 class MainView(QWidget):
     request_refresh = pyqtSignal()
     request_export = pyqtSignal()
@@ -1152,12 +1311,10 @@ class MainView(QWidget):
         prev_scroll = vbar.value()
 
         self.table.setUpdatesEnabled(False)
-        # Force proxy to re-evaluate + sort with current column
         self.proxy.invalidate()
         self.proxy.sort(col if col >= 0 else 2, order if order is not None else Qt.SortOrder.DescendingOrder)
         self.table.setUpdatesEnabled(True)
 
-        # restore selection + scroll
         self._restore_selection(prev_sel)
         vbar.setValue(prev_scroll)
 
@@ -1179,7 +1336,6 @@ class MainView(QWidget):
             return
         sm.clearSelection()
         id_set = set(ids)
-        # build a quick lookup from user_id to source row
         uid_to_row: Dict[int, int] = {}
         for i, r in enumerate(getattr(self.model, "_rows", [])):
             uid_to_row[int(r.user_id)] = i
@@ -1205,29 +1361,22 @@ class MainView(QWidget):
             self._schedule_resort()
 
     def set_rows(self, rows: List[TargetInfo]):
-        # remember selection + scroll
         prev_sel = self._selected_ids()
         sb = self.table.verticalScrollBar()
         scroll_val = sb.value()
 
-        # update model
         self.model.set_rows(rows)
 
-        # size columns only once
         if not getattr(self, "_did_size_cols", False):
             self.table.resizeColumnsToContents()
             self.table.horizontalHeader().setStretchLastSection(True)
             self._did_size_cols = True
 
-        # restore selection and scroll
         self._restore_selection(prev_sel)
         sb.setValue(scroll_val)
 
-        # re-apply the user’s current sort (stable-ish, but not on every data change)
         hdr = self.table.horizontalHeader()
         self.proxy.sort(hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
-
-
 
     def set_ignored(self, ids: Set[int]):
         self._ignored_ids = set(ids)
@@ -1258,29 +1407,31 @@ class MainView(QWidget):
     # ---- openers ----
     def _open_profile(self, idx: QModelIndex):
         r = self._index_to_row(idx)
+        url = QUrl.fromUserInput(profile_url(r.user_id))
         if r.user_id in self._ignored_ids:
             dlg = IgnoredPromptDialog(r.name or str(r.user_id), self, open_what="profile")
             if dlg.exec():
                 if dlg.result_choice == "unignore_open":
                     self.unignore_ids.emit([r.user_id])
-                    QDesktopServices.openUrl(QUrl(profile_url(r.user_id)))
+                    QDesktopServices.openUrl(url)
                 elif dlg.result_choice == "open_once":
-                    QDesktopServices.openUrl(QUrl(profile_url(r.user_id)))
+                    QDesktopServices.openUrl(url)
             return
-        QDesktopServices.openUrl(QUrl(profile_url(r.user_id)))
+        QDesktopServices.openUrl(url)
 
     def _open_attack(self, idx: QModelIndex):
         r = self._index_to_row(idx)
+        url = QUrl.fromUserInput(attack_url(r.user_id))
         if r.user_id in self._ignored_ids:
             dlg = IgnoredPromptDialog(r.name or str(r.user_id), self, open_what="attack")
             if dlg.exec():
                 if dlg.result_choice == "unignore_open":
                     self.unignore_ids.emit([r.user_id])
-                    QDesktopServices.openUrl(QUrl(attack_url(r.user_id)))
+                    QDesktopServices.openUrl(url)
                 elif dlg.result_choice == "open_once":
-                    QDesktopServices.openUrl(QUrl(attack_url(r.user_id)))
+                    QDesktopServices.openUrl(url)
             return
-        QDesktopServices.openUrl(QUrl(attack_url(r.user_id)))
+        QDesktopServices.openUrl(url)
 
     # ---- context menu ----
     def _menu(self, pos):
@@ -1295,7 +1446,6 @@ class MainView(QWidget):
         if idx.isValid():
             r = self._index_to_row(idx)
 
-            # Iconed actions
             act_open_profile = QAction(icon("profile"), "Open Profile", self)
             act_open_profile.triggered.connect(lambda: self._open_profile(idx))
 
@@ -1343,7 +1493,10 @@ class MainView(QWidget):
         dlg.accepted_ids.connect(lambda ids: self.request_add_targets.emit(ids) if ids else None)
         dlg.exec()
 
-# ---------- Add Targets dialog ----------
+# ======================================================================
+#                       ADD TARGETS DIALOG
+# ======================================================================
+
 class AddTargetsDialog(QDialog):
     accepted_ids = pyqtSignal(list)
     def __init__(self, parent=None):

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import os
+import sys
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QSize, QPoint, QTimer
+from PyQt6.QtCore import Qt, QSize, QPoint
 from PyQt6.QtGui import QIcon, QFontMetrics, QCursor, QColor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -20,19 +21,14 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QFrame,
     QGraphicsDropShadowEffect,
+    QStyle,
 )
 
 # App modules
 from views import MainView
 from storage import load_settings, save_settings, get_appdata_dir
 
-# Optional onboarding (no-op if not present)
-try:
-    from onboarding import maybe_show_onboarding
-except Exception:  # pragma: no cover
-    def maybe_show_onboarding(parent=None):  # type: ignore
-        return
-
+# (Onboarding is triggered from main.py; we don't open it here.)
 
 # ---------------- logging ----------------
 logger = logging.getLogger("TargetTracker.Main")
@@ -43,27 +39,78 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
-# ---------------- util: icons ----------------
-def _icon_path(name: str) -> Optional[str]:
-    for p in (
-        os.path.join("assets", f"ic-{name}.svg"),
-        os.path.join("assets", f"ic-{name}.png"),
-        f"ic-{name}.svg",
-        f"ic-{name}.png",
-    ):
-        if os.path.exists(p):
+# ---------------- PyInstaller-safe asset helpers ----------------
+def asset_path(rel: str) -> str:
+    """
+    Resolve a path inside the bundled app. Works both in source and in
+    PyInstaller one-file/one-dir builds.
+    """
+    base = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
+    return os.path.join(base, rel)
+
+
+def _first_existing(candidates) -> Optional[str]:
+    for p in candidates:
+        # If a candidate is relative, look inside the bundle first
+        full = asset_path(p) if not os.path.isabs(p) else p
+        if os.path.exists(full):
+            return full
+        # Also try plain relative (developer runs from repo)
+        if not os.path.isabs(p) and os.path.exists(p):
             return p
     return None
 
 
+def _icon_path(name: str) -> Optional[str]:
+    # Preferred locations / names
+    return _first_existing([
+        os.path.join("assets", f"ic-{name}.svg"),
+        os.path.join("assets", f"ic-{name}.png"),
+        f"ic-{name}.svg",
+        f"ic-{name}.png",
+    ])
+
+
+def _fallback_qt_icon(name: str) -> QIcon:
+    """Map our semantic names to Qt standard icons (last-resort)."""
+    style = QApplication.instance().style() if QApplication.instance() else None
+    if not style:
+        return QIcon()
+    mapping = {
+        "check": QStyle.StandardPixmap.SP_DialogApplyButton,
+        "warning": QStyle.StandardPixmap.SP_MessageBoxWarning,
+        "error": QStyle.StandardPixmap.SP_MessageBoxCritical,
+        "refresh": QStyle.StandardPixmap.SP_BrowserReload,
+        "info": QStyle.StandardPixmap.SP_MessageBoxInformation,
+    }
+    sp = mapping.get(name)
+    return style.standardIcon(sp) if sp is not None else QIcon()
+
+
 def app_icon() -> QIcon:
-    p = _icon_path("app")
-    return QIcon(p) if p else QIcon()
+    """
+    Prefer the app's ICO (for Windows taskbar/window), then fall back to ic-app.*
+    and finally a standard info icon.
+    """
+    p = _first_existing([
+        os.path.join("assets", "logo.ico"),
+        os.path.join("assets", "ic-app.png"),
+        os.path.join("assets", "ic-app.svg"),
+    ])
+    if p:
+        return QIcon(p)
+    return _fallback_qt_icon("info")
 
 
 def themed_icon(name: str) -> QIcon:
+    """
+    Themed icons used across the UI. Tries packaged assets first; if missing,
+    falls back to a Qt standard icon so the build still shows something.
+    """
     p = _icon_path(name)
-    return QIcon(p) if p else QIcon()
+    if p:
+        return QIcon(p)
+    return _fallback_qt_icon(name)
 
 
 # ---------------- dark style ----------------
@@ -108,6 +155,8 @@ def ensure_first_run_targets() -> str:
         logger.warning("Failed to ensure AppData folder: %s", e)
 
     st = load_settings()
+    if not isinstance(st, dict):
+        st = {}
     target_path = st.get("targets_file")
     if not target_path:
         target_path = os.path.join(appdir, "target.json")
@@ -199,10 +248,7 @@ class PrettyProgress(QProgressBar):
 
 
 class InfoPopover(QFrame):
-    """
-    Lightweight, non-flickery popover that behaves like a tooltip
-    but stays visible while the mouse is over the icon or the popover.
-    """
+    """Lightweight, non-flickery popover with rich HTML."""
     def __init__(self):
         super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -218,15 +264,15 @@ class InfoPopover(QFrame):
                 color: #e6eef8;
             }
         """)
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(10, 8, 10, 8)
-        self._label = QLabel("")
-        self._label.setTextFormat(Qt.TextFormat.RichText)
-        self._label.setOpenExternalLinks(True)
-        self._label.setWordWrap(True)
-        self._layout.addWidget(self._label)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        label = QLabel("")
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setOpenExternalLinks(True)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        self._label = label
 
-        # Soft drop shadow
         effect = QGraphicsDropShadowEffect(self)
         effect.setBlurRadius(24)
         effect.setOffset(0, 8)
@@ -243,101 +289,50 @@ class InfoPopover(QFrame):
 
     def under_cursor(self) -> bool:
         pos = QCursor.pos()
-        # Hit-test in local coordinates to avoid flicker
         return self.rect().contains(self.mapFromGlobal(pos))
 
 
 class HoverIcon(QLabel):
-    """
-    QLabel that renders crisp icons without clipping and shows a custom popover
-    that does not flicker and stays open while hovered.
-    """
+    """QLabel that shows crisp icons and a custom popover."""
     def __init__(self):
         super().__init__()
-        self.setFixedSize(QSize(22, 22))            # room to avoid SVG clipping
+        self.setFixedSize(QSize(22, 22))
         self.setContentsMargins(0, 0, 0, 0)
         self.setScaledContents(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self._enabled = True
-        self._html_tip: str = ""
+        self._html_tip = ""
         self._popover = InfoPopover()
 
-        # Timers for smooth show/hide without loops
-        self._show_timer = QTimer(self)
-        self._show_timer.setSingleShot(True)
-        self._show_timer.setInterval(120)
-        self._show_timer.timeout.connect(self._really_show)
-
-        self._hide_timer = QTimer(self)
-        self._hide_timer.setSingleShot(True)
-        self._hide_timer.setInterval(200)  # slightly longer to allow moving to popover
-        self._hide_timer.timeout.connect(self._maybe_hide)
-
     def set_icon(self, ic: QIcon, size: int = 20):
-        if ic and not ic.isNull():
-            self.setPixmap(ic.pixmap(size, size))
-        else:
-            self.setPixmap(QIcon().pixmap(size, size))
+        self.setPixmap(ic.pixmap(size, size) if ic and not ic.isNull() else QIcon().pixmap(size, size))
 
     def set_rich_tooltip(self, html: str, enabled: bool = True):
         self._html_tip = html or ""
         self._enabled = bool(enabled)
 
-    # --- events ---
     def enterEvent(self, ev):
         super().enterEvent(ev)
         if self._enabled and self._html_tip:
-            self._show_timer.start()
-            self._hide_timer.stop()
+            self._popover.set_html(self._html_tip)
+            rect = self.rect()
+            top_left = self.mapToGlobal(rect.topLeft())
+            bottom_left = self.mapToGlobal(rect.bottomLeft())
+            screen = QApplication.screenAt(top_left) or QApplication.primaryScreen()
+            avail = screen.availableGeometry()
+            gap = 8
+            x = top_left.x()
+            y = top_left.y() - self._popover.height() - gap
+            if y < avail.top() + 6:
+                y = bottom_left.y() + gap
+            x = max(avail.left() + 6, min(x, avail.right() - 6 - self._popover.width()))
+            self._popover.show_at(QPoint(x, y))
 
     def leaveEvent(self, ev):
         super().leaveEvent(ev)
-        # Start a delayed hide; cancel if we re-enter or if popover is hovered
-        self._hide_timer.start()
-
-    def mouseMoveEvent(self, ev):
-        # Keep it visible while we move within the icon
-        if self._popover.isVisible():
-            self._hide_timer.stop()
-        super().mouseMoveEvent(ev)
-
-    # --- internals ---
-    def _really_show(self):
-        if not (self._enabled and self._html_tip):
-            return
-        self._popover.set_html(self._html_tip)
-        self._popover.adjustSize()
-
-        icon_rect = self.rect()
-        global_top_left = self.mapToGlobal(icon_rect.topLeft())
-        global_bottom_left = self.mapToGlobal(icon_rect.bottomLeft())
-
-        # Pick the screen *at the icon*, not the primary screen
-        screen = QApplication.screenAt(global_top_left) or QApplication.primaryScreen()
-        avail = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
-
-        gap = 8
-        # preferred: above
-        x = global_top_left.x()
-        y = global_top_left.y() - self._popover.height() - gap
-
-        # flip below if not enough headroom
-        if y < avail.top() + 6:
-            y = global_bottom_left.y() + gap
-
-        # clamp horizontally
-        x = max(avail.left() + 6, min(x, avail.right() - 6 - self._popover.width()))
-
-        self._popover.show_at(QPoint(x, y))
-
-    def _maybe_hide(self):
-        # Keep shown if mouse is over icon or popover
-        global_pos = QCursor.pos()
-        over_icon = self.rect().contains(self.mapFromGlobal(global_pos))
-        if over_icon or self._popover.under_cursor():
-            return
-        self._popover.hide()
+        if not self._popover.under_cursor():
+            self._popover.hide()
 
 
 class Pill(QLabel):
@@ -361,10 +356,9 @@ class FancyStatusBar(QStatusBar):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSizeGripEnabled(False)
-        self.setMinimumHeight(28)  # give icons/badges breathing room
+        self.setMinimumHeight(28)
         self.setStyleSheet("QStatusBar { border-top: 1px solid rgba(255,255,255,0.08); }")
 
-        # Left: icon + elided text (added as normal widget)
         self._left = QWidget(self)
         hl = QHBoxLayout(self._left)
         hl.setContentsMargins(6, 2, 6, 2)
@@ -377,17 +371,14 @@ class FancyStatusBar(QStatusBar):
         hl.addWidget(self._icon)
         hl.addWidget(self._msg, 1)
 
-        # Center: progress (permanent)
         self._prog = PrettyProgress()
         self._prog.setRange(0, 1)
         self._prog.setValue(0)
         self._prog.setTextVisible(True)
         self._prog.setFormat("0/1")
 
-        # Right: meta pill (permanent)
         self._meta = Pill("—")
 
-        # add to status bar
         self.addWidget(self._left, 1)
         self.addPermanentWidget(self._prog, 0)
         self.addPermanentWidget(self._meta, 0)
@@ -396,7 +387,6 @@ class FancyStatusBar(QStatusBar):
         self._set_status_icon("info")
         self._set_info_tooltip()
 
-    # ---------- public API (used from the Controller via MainWindow) ----------
     def set_message(self, text: str):
         text = text or ""
         fm = QFontMetrics(self._msg.font())
@@ -420,7 +410,6 @@ class FancyStatusBar(QStatusBar):
         self._meta.setText(text or "—")
         self._meta.setToolTip(text or "")
 
-    # ---------- internals ----------
     def _set_status_icon(self, kind: str):
         # kind: info | progress | ok | warn | error
         name = {
@@ -459,7 +448,6 @@ class FancyStatusBar(QStatusBar):
 
     def _apply_icon_and_color(self, text: str):
         import re
-        # Parse errors either "errors: N" or "… N errors"
         self._current_errors = 0
         m = re.search(r"errors:\s*(\d+)", text, flags=re.IGNORECASE) or \
             re.search(r"\b(\d+)\s+errors\b", text, flags=re.IGNORECASE)
@@ -483,14 +471,12 @@ class FancyStatusBar(QStatusBar):
             self._set_status_icon("info")
             self._prog.set_ok()
 
-        # Popover content depending on error state
         if self._current_errors > 0:
             self._set_error_tooltip(self._current_errors)
         else:
             self._set_info_tooltip()
 
 
-# ---------------- Main Window ----------------
 class MainWindow(QMainWindow):
     """
     The window does not import or construct the Controller directly — call
@@ -502,7 +488,6 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self.resize(1200, 720)
 
-        # central view
         self.view = MainView()
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -510,14 +495,10 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.view)
         self.setCentralWidget(central)
 
-        # fancy status bar
         self._status = FancyStatusBar(self)
         self.setStatusBar(self._status)
 
         self._controller = None  # set via attach_controller()
-
-        # show onboarding after the window is up (first run / user preference)
-        QTimer.singleShot(0, lambda: maybe_show_onboarding(self))
 
     def attach_controller(self, controller):
         """Attach the app Controller and wire status callbacks."""
@@ -528,7 +509,6 @@ class MainWindow(QMainWindow):
             meta_cb=self._status.set_meta,
         )
 
-    # ---- close/save hooks ----
     def closeEvent(self, e):
         try:
             st = load_settings()

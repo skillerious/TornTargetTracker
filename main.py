@@ -18,7 +18,7 @@ from storage import (
 from api import TornAPI
 from workers import BatchFetcher
 from views import MainView, IgnoreDialog, AboutDialog, AddTargetsDialog
-from settings_dialog import SettingsDialog
+# NOTE: do NOT import SettingsDialog here; we hot-reload it in show_settings()
 from rate_limiter import RateLimiter
 from controllers import MainWindow, apply_darkstyle, ensure_first_run_targets
 
@@ -40,10 +40,7 @@ if not logger.handlers:
 
 class Controller(QObject):
     """
-    Controller with incremental UI updates to prevent table jumping while fetching:
-      • View is populated once (from cache), then each fetched row is upserted.
-      • Sorting is coalesced in the view; selection & scroll are preserved.
-
+    Controller with incremental UI updates to prevent table jumping while fetching.
     Shutdown-aware: exposes shutdown() to stop workers and timers on app close.
     """
 
@@ -312,8 +309,13 @@ class Controller(QObject):
     # ---------------- Dialogs ----------------
 
     def show_settings(self):
+        import importlib, settings_dialog
+        importlib.reload(settings_dialog)  # dev-only
+        print("SettingsDialog from:", settings_dialog.__file__)
+        SettingsDialog = settings_dialog.SettingsDialog
+
         dlg = SettingsDialog(self.settings, self.view)
-        new_st: dict = {}
+        new_st = {}
         dlg.saved.connect(lambda s: new_st.update(s))
         if dlg.exec():
             if new_st:
@@ -323,6 +325,7 @@ class Controller(QObject):
                 logger.info("Settings saved: %r", new_st)
                 self._update_auto_timer()
                 self.refresh()
+
 
     def show_ignore(self):
         infos: List[TargetInfo] = []

@@ -6,6 +6,7 @@ import json
 import threading
 import logging
 from typing import List, Set, Dict, Optional, Tuple
+from search_bar import SearchBar
 
 import requests
 
@@ -279,79 +280,7 @@ class TargetsModel(QAbstractTableModel):
     def row(self, idx: int) -> TargetInfo:
         return self._rows[idx]
 
-# ======================================================================
-#                           SEARCH BAR
-# ======================================================================
 
-class SearchBar(QWidget):
-    """
-    Debounced search with scope, regex and case toggles.
-    Emits queryChanged(dict) => {'text','mode','regex','case_sensitive'}
-    """
-    queryChanged = pyqtSignal(dict)
-
-    def __init__(self):
-        super().__init__()
-        lay = QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
-
-        self.scope = QComboBox()
-        self.scope.addItems(["All", "Name", "ID", "Faction"])
-        self.scope.setToolTip("Search scope")
-        self.scope.currentIndexChanged.connect(self._emit)
-
-        self.edit = QLineEdit()
-        self.edit.setPlaceholderText("Search…  (text, /regex/, id, faction)")
-        self.edit.textChanged.connect(self._debounced_emit)
-        # leading search icon
-        act_left = self.edit.addAction(icon("search") if not icon("search").isNull() else
-                                       self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogStart),
-                                       QLineEdit.ActionPosition.LeadingPosition)
-        act_left.setToolTip("Search")
-        # trailing clear action
-        clear_ic = icon("clear")
-        if clear_ic.isNull():
-            clear_ic = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton)
-        act_clear = self.edit.addAction(clear_ic, QLineEdit.ActionPosition.TrailingPosition)
-        act_clear.setToolTip("Clear")
-        act_clear.triggered.connect(self.edit.clear)
-
-        self.btn_regex = QToolButton()
-        self.btn_regex.setText(".*")
-        self.btn_regex.setCheckable(True)
-        self.btn_regex.setToolTip("Regex match")
-        self.btn_regex.toggled.connect(self._emit)
-
-        self.btn_case = QToolButton()
-        self.btn_case.setText("Aa")
-        self.btn_case.setCheckable(True)
-        self.btn_case.setToolTip("Case sensitive")
-        self.btn_case.toggled.connect(self._emit)
-
-        lay.addWidget(self.scope)
-        lay.addWidget(self.edit, 1)
-        lay.addWidget(self.btn_regex)
-        lay.addWidget(self.btn_case)
-
-        self._timer = QTimer(self); self._timer.setSingleShot(True); self._timer.setInterval(200)
-        self._timer.timeout.connect(self._emit)
-
-    def focus(self): self.edit.setFocus()
-
-    def _debounced_emit(self, _): self._timer.start()
-
-    def _emit(self):
-        text = self.edit.text()
-        # smart detect /regex/ input
-        if text.startswith("/") and text.endswith("/") and len(text) >= 2:
-            self.btn_regex.setChecked(True)
-            text = text[1:-1]
-        q = {
-            "text": text,
-            "mode": self.scope.currentText().lower(),  # 'all' | 'name' | 'id' | 'faction'
-            "regex": self.btn_regex.isChecked(),
-            "case_sensitive": self.btn_case.isChecked(),
-        }
-        self.queryChanged.emit(q)
 
 # ======================================================================
 #                           FILTER PROXY
@@ -442,155 +371,8 @@ class FilterProxy(QSortFilterProxyModel):
         if ("travel" in chip and not self.show_traveling): return False
         return True
 
-# ======================================================================
-#                           SETTINGS DIALOG
-# ======================================================================
+from settings_dialog import SettingsDialog
 
-class SettingsDialog(QDialog):
-    saved = pyqtSignal(dict)
-
-    def __init__(self, settings: dict, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setModal(True)
-        self.setMinimumWidth(640)
-
-        tabs = QTabWidget(self)
-
-        # ---- API tab
-        api_tab = QWidget(); api_form = QFormLayout(api_tab)
-
-        self.ed_api = QLineEdit(settings.get("api_key",""))
-        self.ed_api.setEchoMode(QLineEdit.EchoMode.Password)
-        btn_show = QPushButton("Show"); btn_show.setCheckable(True)
-        btn_show.toggled.connect(lambda ch: self.ed_api.setEchoMode(QLineEdit.EchoMode.Normal if ch else QLineEdit.EchoMode.Password))
-        row_api_key = QWidget(); hb = QHBoxLayout(row_api_key); hb.setContentsMargins(0,0,0,0)
-        hb.addWidget(self.ed_api, 1); hb.addWidget(btn_show)
-
-        self.ed_targets = QLineEdit(settings.get("targets_file","target.json"))
-        btn_pick = QPushButton("Browse…"); btn_pick.clicked.connect(self._pick_targets)
-        row_t = QWidget(); hb2 = QHBoxLayout(row_t); hb2.setContentsMargins(0,0,0,0)
-        hb2.addWidget(self.ed_targets, 1); hb2.addWidget(btn_pick)
-
-        api_form.addRow("API key:", row_api_key)
-        api_form.addRow("Targets file:", row_t)
-
-        # ---- Data & Cache tab
-        data_tab = QWidget(); data = QFormLayout(data_tab)
-        self.lbl_appdata = QLabel(get_appdata_dir())
-        self.lbl_appdata.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        btn_open_appdata = QPushButton("Open Folder"); btn_open_appdata.clicked.connect(self._open_appdata)
-        row_app = QWidget(); hb3 = QHBoxLayout(row_app); hb3.setContentsMargins(0, 0, 0, 0)
-        hb3.addWidget(self.lbl_appdata, 1); hb3.addWidget(btn_open_appdata)
-
-        self.chk_load_cache = QCheckBox("Load cache at startup")
-        self.chk_load_cache.setChecked(bool(settings.get("load_cache_at_start", True)))
-
-        self.sb_save_every = QSpinBox(); self.sb_save_every.setRange(5, 200); self.sb_save_every.setValue(int(settings.get("save_cache_every", 20)))
-        self.sb_save_every.setSuffix(" updates")
-
-        data.addRow("AppData folder:", row_app)
-        data.addRow("", self.chk_load_cache)
-        data.addRow("Save cache every:", self.sb_save_every)
-
-        # ---- Performance tab
-        perf_tab = QWidget(); perf = QFormLayout(perf_tab)
-        self.sb_conc = QSpinBox(); self.sb_conc.setRange(1, 16); self.sb_conc.setValue(int(settings.get("concurrency", 4)))
-        self.sb_auto = QSpinBox(); self.sb_auto.setRange(0, 3600); self.sb_auto.setSuffix(" sec"); self.sb_auto.setValue(int(settings.get("auto_refresh_sec", 0)))
-        self.sb_rate_cap = QSpinBox(); self.sb_rate_cap.setRange(10, 200); self.sb_rate_cap.setValue(int(settings.get("rate_max_per_min", 100)))
-        self.sb_min_interval = QSpinBox(); self.sb_min_interval.setRange(0, 2000); self.sb_min_interval.setSuffix(" ms"); self.sb_min_interval.setValue(int(settings.get("min_interval_ms", settings.get("req_delay_ms", 620))))
-        perf.addRow("Concurrency:", self.sb_conc)
-        perf.addRow("Auto refresh:", self.sb_auto)
-        perf.addRow("Rate cap (per minute):", self.sb_rate_cap)
-        perf.addRow("Min interval between calls:", self.sb_min_interval)
-
-        # ---- Retry/Backoff tab
-        back_tab = QWidget(); back = QFormLayout(back_tab)
-        self.sb_max_retries = QSpinBox(); self.sb_max_retries.setRange(1, 12); self.sb_max_retries.setValue(int(settings.get("max_retries", 8)))
-        self.sb_backoff_base = QSpinBox(); self.sb_backoff_base.setRange(0, 2000); self.sb_backoff_base.setSuffix(" ms"); self.sb_backoff_base.setValue(int(settings.get("backoff_base_ms", 600)))
-        self.sb_backoff_cap = QSpinBox(); self.sb_backoff_cap.setRange(1, 30); self.sb_backoff_cap.setSuffix(" s"); self.sb_backoff_cap.setValue(int(settings.get("backoff_cap_s", 8)))
-        self.chk_retry_after = QCheckBox("Honor Retry-After header"); self.chk_retry_after.setChecked(bool(settings.get("respect_retry_after", True)))
-        back.addRow("Max retries:", self.sb_max_retries)
-        back.addRow("Backoff base:", self.sb_backoff_base)
-        back.addRow("Backoff cap:", self.sb_backoff_cap)
-        back.addRow("", self.chk_retry_after)
-
-        # ---- Help tab
-        help_tab = QWidget(); v = QVBoxLayout(help_tab); v.setContentsMargins(0,0,0,0)
-        help_box = QTextBrowser()
-        help_box.setOpenExternalLinks(True)
-        help_box.setHtml(
-            "<style>a { color: #4da3ff; }</style>"
-            "<p><b>Tips</b></p>"
-            "<ul>"
-            "<li><i>Rate cap</i> + <i>Min interval</i> keep you under Torn's 100/min global limit.</li>"
-            "<li>Retries/backoff apply when the API returns <i>429 Too Many Requests</i> or transient errors.</li>"
-            "<li>Cache is updated periodically to speed up the next launch.</li>"
-            "</ul>"
-        )
-        v.addWidget(help_box)
-
-        for (name, w) in (("API", api_tab), ("Data & Cache", data_tab), ("Performance", perf_tab), ("Retry & Backoff", back_tab), ("Help", help_tab)):
-            tabs.addTab(w, name)
-
-        # ---- footer buttons
-        btns = QWidget(); hb = QHBoxLayout(btns); hb.setContentsMargins(0,0,0,0)
-        hb.addStretch(1)
-        btn_reset = QPushButton("Reset values")
-        btn_save = QPushButton("Save")
-        btn_cancel = QPushButton("Cancel")
-        hb.addWidget(btn_reset); hb.addWidget(btn_save); hb.addWidget(btn_cancel)
-
-        root = QVBoxLayout(self)
-        root.addWidget(tabs)
-        root.addWidget(btns)
-
-        # wire
-        btn_reset.clicked.connect(self._reset_numbers)
-        btn_save.clicked.connect(self._save)
-        btn_cancel.clicked.connect(self.reject)
-
-    def _pick_targets(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Pick targets JSON", "", "JSON (*.json)")
-        if p: self.ed_targets.setText(p)
-
-    def _open_appdata(self):
-        QDesktopServices.openUrl(QUrl.fromLocalFile(get_appdata_dir()))
-
-    def _reset_numbers(self):
-        self.sb_conc.setValue(4)
-        self.sb_auto.setValue(0)
-        self.sb_rate_cap.setValue(100)
-        self.sb_min_interval.setValue(620)
-        self.sb_save_every.setValue(20)
-        self.sb_max_retries.setValue(8)
-        self.sb_backoff_base.setValue(600)
-        self.sb_backoff_cap.setValue(8)
-        self.chk_retry_after.setChecked(True)
-
-    def _save(self):
-        self.saved.emit({
-            "api_key": self.ed_api.text().strip(),
-            "targets_file": self.ed_targets.text().strip() or "target.json",
-            "concurrency": int(self.sb_conc.value()),
-            "auto_refresh_sec": int(self.sb_auto.value()),
-            "rate_max_per_min": int(self.sb_rate_cap.value()),
-            "min_interval_ms": int(self.sb_min_interval.value()),
-            "load_cache_at_start": True if self._get_chk(self.chk_load_cache) else False,
-            "save_cache_every": int(self.sb_save_every.value()),
-            "max_retries": int(self.sb_max_retries.value()),
-            "backoff_base_ms": int(self.sb_backoff_base.value()),
-            "backoff_cap_s": int(self.sb_backoff_cap.value()),
-            "respect_retry_after": True if self._get_chk(self.chk_retry_after) else False,
-            "req_delay_ms": int(self.sb_min_interval.value()),
-        })
-        self.accept()
-
-    def _get_chk(self, cb: QCheckBox) -> bool:
-        try:
-            return bool(cb.isChecked())
-        except Exception:
-            return False
 
 # ======================================================================
 #                           IGNORE DIALOGS
@@ -624,6 +406,7 @@ class IgnoreDialog(QDialog):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         self.search = QLineEdit(placeholderText="Search name or ID…")
+        self.search.setObjectName("search")  # ensure stylesheet applies
         self.search.setClearButtonEnabled(True)
         act_left = self.search.addAction(icon("search"), QLineEdit.ActionPosition.LeadingPosition)
         act_left.setToolTip("Search")
@@ -1239,7 +1022,7 @@ class AboutDialog(QDialog):
         h.addWidget(self.version_pill, 0, Qt.AlignmentFlag.AlignTop)
 
         # green pill (transparent interior) for updates
-        def _green_dot_pm(sz=12):
+        def _green_dot_pm(sz=14):
             pm = QPixmap(sz, sz); pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             color = QColor(72, 187, 120)

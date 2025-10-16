@@ -113,15 +113,20 @@ def themed_icon(name: str) -> QIcon:
 
 
 # ---------------- dark style ----------------
-def apply_darkstyle(app: QApplication):
-    """Apply QDarkStyle for PyQt6 if available (no crash if missing)."""
-    base = ""
+def apply_darkstyle(app: QApplication) -> str:
+    """
+    Return the QDarkStyle stylesheet (plus app-specific tweaks) without
+    installing it globally on the QApplication. Callers can apply the
+    returned QSS selectively (e.g., to the main window) so other dialogs can
+    opt out or override as needed.
+    """
+    qss = ""
     try:
         import qdarkstyle  # pip install qdarkstyle
         try:
-            base = qdarkstyle.load_stylesheet(qt_api="pyqt6")
+            qss = qdarkstyle.load_stylesheet(qt_api="pyqt6")
         except Exception:
-            base = qdarkstyle.load_stylesheet_pyqt6()
+            qss = qdarkstyle.load_stylesheet_pyqt6()
     except Exception as e:
         logger.warning("QDarkStyle not applied: %s", e)
 
@@ -134,7 +139,9 @@ def apply_darkstyle(app: QApplication):
         border-radius: 8px;
     }
     """
-    app.setStyleSheet((base or "") + "\n" + extra_css)
+    qss = (qss or "") + "\n" + extra_css
+    app.setProperty("_tt_dark_qss", qss)
+    return qss
 
 
 # ---------------- first-run: ensure targets.json in AppData ----------------

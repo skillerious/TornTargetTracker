@@ -492,13 +492,15 @@ def main():
     app = QApplication([])
     app.setApplicationName("Target Tracker")
 
-    apply_darkstyle(app)
+    dark_qss = apply_darkstyle(app)
 
     # ensure AppData folder & first-run targets.json
     ensure_first_run_targets()
 
     # single window only
     win = MainWindow()
+    if dark_qss:
+        win.setStyleSheet(dark_qss)
 
     # Construct controller and attach (avoids circular imports)
     controller = Controller(win.view)

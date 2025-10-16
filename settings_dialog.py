@@ -15,8 +15,9 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFormLayout,
     QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QSlider, QSpinBox, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout,
-    QWidget, QTreeWidget, QTreeWidgetItem, QStyleFactory, QSizePolicy, QFrame
+    QSlider, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout,
+    QWidget, QStyleFactory, QSizePolicy, QFrame, QScrollArea, QStyle, QTabWidget,
+    QGroupBox
 )
 
 from storage import get_appdata_dir, load_targets_from_file
@@ -24,11 +25,10 @@ from storage import get_appdata_dir, load_targets_from_file
 
 __all__ = ["SettingsDialog"]
 
-
 API_HELP_URL = "https://www.torn.com/preferences.php#tab=api"
 
 
-# ───────────────────────── helpers ─────────────────────────
+# ------------------------- helpers -------------------------
 
 def _icon_path(name: str) -> Optional[str]:
     for p in (
@@ -52,111 +52,114 @@ def _looks_like_api_key(s: str) -> bool:
     return s.isalnum() and 16 <= len(s) <= 64
 
 
-# ───────────────────────── dialog ─────────────────────────
+class SettingsSection(QGroupBox):
+    """Compact group-box container with a form body."""
+    def __init__(self, title: str, subtitle: str = "", parent=None):
+        super().__init__(title, parent)
+        self.setObjectName("settingsGroup")
+        self.setFlat(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 14, 10, 10)  # compact
+        outer.setSpacing(6)
+
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setObjectName("groupSubtitle")
+            sub.setWordWrap(True)
+            outer.addWidget(sub)
+
+        body = QWidget(objectName="groupBody")
+        form = QFormLayout(body)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)              # compact rows
+        form.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(body)
+
+        self._form = form
+
+    @property
+    def form(self) -> QFormLayout:
+        return self._form
+
+
+# ------------------------- dialog -------------------------
 
 class SettingsDialog(QDialog):
     """
-    Fresh, self-styled Settings dialog that doesn’t inherit your app’s QDarkStyle.
-    It forces Fusion style + dark palette and scopes all QSS to its own root.
+    Compact dark-grey, tabbed settings dialog using QGroupBox sections.
+    Preserves all logic (signals, payload, retries/backoff, etc.).
     """
     saved = pyqtSignal(dict)
 
     def __init__(self, settings: Dict, parent=None):
         super().__init__(parent)
 
-        # — Force a different style/palette so it cannot look like the old window —
+        # Fusion + tuned dark palette
         self._apply_fusion_dark()
         self.setObjectName("TTSettingsRoot")
-        self.setWindowTitle("Settings — NEW UI")
-        self.resize(980, 640)
-        self.setMinimumSize(860, 560)
+        self.setWindowTitle("Settings")
+        self.resize(820, 540)
+        self.setMinimumSize(720, 480)
 
         self._settings = dict(settings or {})
         self._dirty = False
 
+        # Isolate from any global QSS, then apply scoped dark style
+        self.setStyleSheet("")
         self._apply_scoped_qss()
 
         # Root layout
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
-        # Header
+        # Header (compact)
         header = QWidget(objectName="header")
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(14, 10, 14, 10)
-        hl.setSpacing(10)
+        hl = QHBoxLayout(header); hl.setContentsMargins(10, 8, 10, 8); hl.setSpacing(8)
 
         hico = QLabel()
-        # tiny painted gear if no asset present
-        pm = QPixmap(18, 18); pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm); p.setPen(QColor("#A7B7C9")); p.drawEllipse(2, 2, 14, 14); p.end()
-        hico.setPixmap(icon("settings").pixmap(18, 18) if not icon("settings").isNull() else pm)
+        pm = QPixmap(16, 16); pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm); p.setPen(QColor("#9cc7ff")); p.drawEllipse(3, 3, 10, 10); p.end()
+        hico.setPixmap(icon("settings").pixmap(16, 16) if not icon("settings").isNull() else pm)
 
+        title_wrap = QVBoxLayout(); title_wrap.setContentsMargins(0, 0, 0, 0); title_wrap.setSpacing(1)
         hTitle = QLabel("<span class='h1'>Settings</span>")
-        hSub = QLabel("Manage API, targets, cache and performance")
+        hSub = QLabel("Configure API access, cache, performance, and backoff")
         hSub.setProperty("muted", True)
+        title_wrap.addWidget(hTitle); title_wrap.addWidget(hSub)
 
-        twrap = QVBoxLayout(); twrap.setContentsMargins(0, 0, 0, 0); twrap.setSpacing(2)
-        twrap.addWidget(hTitle); twrap.addWidget(hSub)
+        self.lblSummary = QLabel("")
+        self.lblSummary.setObjectName("headerSummary")
 
         hl.addWidget(hico, 0, Qt.AlignmentFlag.AlignTop)
-        hl.addLayout(twrap, 1)
+        hl.addLayout(title_wrap, 1)
+        hl.addWidget(self.lblSummary, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(header)
 
-        # Body
-        body = QWidget()
-        bl = QHBoxLayout(body); bl.setContentsMargins(0, 0, 0, 0); bl.setSpacing(10)
+        # Tabs
+        self.tabs = QTabWidget(objectName="tabs")
+        self.tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.tabs.setDocumentMode(True)
+        root.addWidget(self.tabs, 1)
 
-        # Left: search + tree
-        left = QWidget(objectName="leftPanel")
-        lp = QVBoxLayout(left); lp.setContentsMargins(8, 8, 8, 8); lp.setSpacing(8)
-
-        self.search = QLineEdit(placeholderText="Search settings…")
-        self.search.setObjectName("leftSearch")
-        self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self._filter_tree)
-
-        self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setIndentation(14)
-        self.tree.currentItemChanged.connect(self._on_tree_changed)
-
-        lp.addWidget(self.search); lp.addWidget(self.tree, 1)
-
-        # Right: crumb + stack
-        right = QWidget(objectName="rightPanel")
-        rr = QVBoxLayout(right); rr.setContentsMargins(0, 0, 0, 0); rr.setSpacing(8)
-
-        crumb = QWidget(objectName="crumb")
-        cr = QHBoxLayout(crumb); cr.setContentsMargins(10, 6, 10, 6); cr.setSpacing(8)
-        self.lblCrumb = QLabel("Settings"); self.lblCrumb.setProperty("muted", True)
-        cr.addWidget(self.lblCrumb); cr.addStretch(1)
-
-        self.stack = QStackedWidget()
-        rr.addWidget(crumb); rr.addWidget(self.stack, 1)
-
-        bl.addWidget(left, 0); bl.addWidget(right, 1)
-        root.addWidget(body, 1)
-
-        # Footer
+        # Footer (compact)
         footer = QWidget(objectName="footer")
-        fl = QHBoxLayout(footer); fl.setContentsMargins(8, 8, 8, 8); fl.setSpacing(8)
+        fl = QHBoxLayout(footer); fl.setContentsMargins(6, 6, 6, 6); fl.setSpacing(6)
 
-        self.btn_defaults = QPushButton("Restore Defaults")
-        fl.addWidget(self.btn_defaults)
-        fl.addStretch(1)
+        self.btn_defaults = QPushButton("Restore Defaults"); self.btn_defaults.setProperty("role", "ghost")
+        fl.addWidget(self.btn_defaults); fl.addStretch(1)
 
-        self.btn_ok = QPushButton("OK")
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_apply = QPushButton("Apply"); self.btn_apply.setEnabled(False)
+        self.btn_ok = QPushButton("OK"); self.btn_cancel = QPushButton("Cancel"); self.btn_apply = QPushButton("Apply")
+        self.btn_ok.setProperty("role", "primary"); self.btn_apply.setProperty("role", "primary"); self.btn_apply.setEnabled(False)
         for b in (self.btn_ok, self.btn_cancel, self.btn_apply):
-            b.setMinimumWidth(90)
+            b.setMinimumWidth(88)
         fl.addWidget(self.btn_ok); fl.addWidget(self.btn_cancel); fl.addWidget(self.btn_apply)
         root.addWidget(footer)
 
-        # Build pages + nav
-        self._build_pages_and_tree()
-
-        # Wire actions
+        # Build tabs & wire actions
+        self._build_tabs()
         self.btn_defaults.clicked.connect(self._reset_values)
         self.btn_cancel.clicked.connect(self._maybe_discard_and_close)
         self.btn_ok.clicked.connect(self._save_and_close)
@@ -167,26 +170,23 @@ class SettingsDialog(QDialog):
         QShortcut(QKeySequence("Ctrl+Enter"), self, self._apply)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self._maybe_discard_and_close)
 
-        # Initial section
-        self._select_tree("General")
-
-    # ───────────────────── look & feel ─────────────────────
+    # --------------------- look & feel ---------------------
 
     def _apply_fusion_dark(self):
-        """Force Fusion style and a dark palette on THIS dialog only."""
         self.setStyle(QStyleFactory.create("Fusion"))
         pal = QPalette()
 
-        # Dark base palette
-        bg = QColor(0x23, 0x27, 0x2e)      # main background
-        panel = QColor(0x30, 0x34, 0x3a)   # cards/panels
-        text = QColor(0xE6, 0xEE, 0xF8)
-        muted = QColor(0xA9, 0xB7, 0xC6)
-        hl = QColor(0x4D, 0xA3, 0xFF)
+        window = QColor("#2b2b2b")
+        panel  = QColor("#303030")
+        base   = QColor("#353535")
+        text   = QColor("#f1f1f1")
+        muted  = QColor("#c7c7c7")
+        blue   = QColor("#2a82da")
+        hltext = QColor("#0d1115")
 
-        pal.setColor(QPalette.ColorRole.Window, bg)
-        pal.setColor(QPalette.ColorRole.Base, panel)
-        pal.setColor(QPalette.ColorRole.AlternateBase, QColor(0x2B, 0x30, 0x35))
+        pal.setColor(QPalette.ColorRole.Window, window)
+        pal.setColor(QPalette.ColorRole.Base, base)
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#3a3a3a"))
         pal.setColor(QPalette.ColorRole.Button, panel)
         pal.setColor(QPalette.ColorRole.ButtonText, text)
         pal.setColor(QPalette.ColorRole.Text, text)
@@ -194,198 +194,290 @@ class SettingsDialog(QDialog):
         pal.setColor(QPalette.ColorRole.BrightText, text)
         pal.setColor(QPalette.ColorRole.ToolTipBase, panel)
         pal.setColor(QPalette.ColorRole.ToolTipText, text)
-        pal.setColor(QPalette.ColorRole.Highlight, hl)
-        pal.setColor(QPalette.ColorRole.HighlightedText, QColor(0x10, 0x14, 0x18))
+        pal.setColor(QPalette.ColorRole.Highlight, blue)
+        pal.setColor(QPalette.ColorRole.HighlightedText, hltext)
+
+        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, muted)
+        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, muted)
 
         self.setPalette(pal)
 
     def _apply_scoped_qss(self):
-        """Stylesheet scoped to #TTSettingsRoot so it overrides app-wide QSS."""
-        self.setStyleSheet("""
-        #TTSettingsRoot { background: #23272e; color: #e6eef8; font-size: 13px; }
+        self.setStyleSheet(
+            """
+#TTSettingsRoot { background: #2b2b2b; color: #f1f1f1; font-size: 12px; }
+#TTSettingsRoot * { background: transparent; }
 
-        /* header / crumb */
-        #TTSettingsRoot QWidget#header, #TTSettingsRoot QWidget#crumb {
-            background: #30343a;
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 8px;
-        }
-        #TTSettingsRoot .h1 { font-size: 16px; font-weight: 600; }
-        #TTSettingsRoot [muted="true"] { color: #a9b7c6; }
+/* Header */
+#TTSettingsRoot QWidget#header {
+    background: #363636;
+    border: 1px solid #4a4a4a;
+    border-radius: 6px;
+}
+#TTSettingsRoot .h1 { font-size: 14px; font-weight: 600; }
+#TTSettingsRoot [muted="true"] { color: #c7c7c7; }
+#TTSettingsRoot QLabel#headerSummary {
+    padding: 4px 8px;
+    border-radius: 10px;
+    background: #2a2f38;
+    border: 1px solid #3e536e;
+    color: #cfe3ff; font-weight: 600; }
 
-        /* left panel */
-        #TTSettingsRoot QWidget#leftPanel {
-            background: #2b3035;
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 8px;
-        }
-        #TTSettingsRoot QLineEdit#leftSearch {
-            background: #353a40; border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 6px; padding: 6px 8px; min-height: 28px;
-        }
-        #TTSettingsRoot QLineEdit#leftSearch:focus { border-color: #4da3ff; }
-        #TTSettingsRoot QTreeWidget { background: transparent; border: none; outline: 0; }
-        #TTSettingsRoot QTreeWidget::item {
-            padding: 6px 8px; margin: 1px 4px; border-radius: 6px;
-        }
-        #TTSettingsRoot QTreeWidget::item:selected { background: #0e639c; color: white; }
-        #TTSettingsRoot QTreeWidget::item:hover { background: rgba(255,255,255,0.08); }
+/* Tabs */
+#TTSettingsRoot QTabWidget#tabs::pane {
+    background: #2b2b2b;
+    border: 1px solid #4a4a4a;
+    border-radius: 6px; top: -1px; }
+#TTSettingsRoot QTabBar::tab {
+    background: #3a3a3a;
+    border: 1px solid #4a4a4a;
+    border-bottom: none;
+    padding: 4px 10px; margin-right: 2px;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+    color: #e0e0e0; }
+#TTSettingsRoot QTabBar::tab:selected { background: #2b2b2b; color: #ffffff; }
+#TTSettingsRoot QTabBar::tab:hover { background: #414141; }
 
-        /* right panel base (inherits window bg) */
-        #TTSettingsRoot QWidget#rightPanel { background: #23272e; }
+/* Group boxes (compact) */
+#TTSettingsRoot QGroupBox#settingsGroup {
+    background: #303030;
+    border: 1px solid #4a4a4a;
+    border-radius: 6px;
+    margin-top: 14px;               /* space for the title */
+    padding-top: 6px;               /* inner padding below title */
+}
+#TTSettingsRoot QGroupBox#settingsGroup::title {
+    subcontrol-origin: margin; subcontrol-position: top left;
+    padding: 0 4px;
+    color: #f1f1f1;
+    background: #2b2b2b;
+    border-radius: 3px;
+    margin-left: 6px;               /* breathing room from border */
+}
+#TTSettingsRoot QLabel#groupSubtitle {
+    color: #c7c7c7; font-size: 11px; }
 
-        /* generic inputs */
-        #TTSettingsRoot QLineEdit, #TTSettingsRoot QSpinBox, #TTSettingsRoot QComboBox,
-        #TTSettingsRoot QTextEdit, #TTSettingsRoot QPlainTextEdit {
-            background: #30343a; border: 1px solid #444a50; border-radius: 6px;
-            padding: 6px 8px; min-height: 26px;
-        }
-        #TTSettingsRoot QLineEdit:focus, #TTSettingsRoot QSpinBox:focus, #TTSettingsRoot QComboBox:focus,
-        #TTSettingsRoot QTextEdit:focus, #TTSettingsRoot QPlainTextEdit:focus { border-color: #4da3ff; }
-        #TTSettingsRoot QToolButton, #TTSettingsRoot QPushButton {
-            background: #30343a; border: 1px solid #444a50; border-radius: 6px;
-            padding: 6px 10px; min-height: 26px; color: #e6eef8;
-        }
-        #TTSettingsRoot QToolButton:hover, #TTSettingsRoot QPushButton:hover { background: #3a3f46; }
-        #TTSettingsRoot QToolButton:pressed, #TTSettingsRoot QPushButton:pressed { background: #2d3136; }
+/* Inputs (compact) */
+#TTSettingsRoot QLineEdit,
+#TTSettingsRoot QSpinBox,
+#TTSettingsRoot QComboBox,
+#TTSettingsRoot QTextBrowser,
+#TTSettingsRoot QTextEdit,
+#TTSettingsRoot QPlainTextEdit {
+    background: #353535;
+    border: 1px solid #4a4a4a;
+    border-radius: 4px;
+    padding: 4px 7px;
+    min-height: 22px;
+}
+#TTSettingsRoot QLineEdit:focus,
+#TTSettingsRoot QSpinBox:focus,
+#TTSettingsRoot QComboBox:focus,
+#TTSettingsRoot QTextBrowser:focus,
+#TTSettingsRoot QTextEdit:focus,
+#TTSettingsRoot QPlainTextEdit:focus {
+    border-color: #2a82da;
+}
 
-        /* footer */
-        #TTSettingsRoot QWidget#footer { border-top: 1px solid #444a50; }
+/* Buttons (compact) */
+#TTSettingsRoot QToolButton,
+#TTSettingsRoot QPushButton {
+    background: #353535; border: 1px solid #4a4a4a; border-radius: 4px;
+    padding: 5px 9px; color: #f1f1f1; }
+#TTSettingsRoot QToolButton:hover,
+#TTSettingsRoot QPushButton:hover { background: #3d3d3d; }
+#TTSettingsRoot QToolButton:pressed,
+#TTSettingsRoot QPushButton:pressed { background: #444444; }
 
-        /* small text helpers */
-        #TTSettingsRoot QLabel.helpSmall { color: #a9b7c6; }
-        #TTSettingsRoot .mono { background: #2e3338; padding: 2px 4px; border-radius: 4px; }
-        """)
+#TTSettingsRoot QPushButton[role="primary"] {
+    background: #2a82da; border-color: #2a82da; color: #ffffff; font-weight: 600; }
+#TTSettingsRoot QPushButton[role="primary"]:hover { background: #3a8fe2; }
+#TTSettingsRoot QPushButton[role="danger"] {
+    background: #5c2a2a; border: 1px solid #8b3a3a; }
+#TTSettingsRoot QPushButton[role="ghost"] {
+    background: transparent; border: 1px solid #4a4a4a; }
 
-    # ───────────────────── tree & pages ─────────────────────
+/* Sliders */
+#TTSettingsRoot QSlider::groove:horizontal { height: 5px; border-radius: 3px; background: #4a4a4a; }
+#TTSettingsRoot QSlider::handle:horizontal {
+    width: 12px; height: 12px; margin: -4px 0;
+    border-radius: 6px; background: #2a82da; border: 1px solid #1b60a1; }
 
-    def _select_tree(self, name: str):
-        want = name.lower()
-        for i in range(self.tree.topLevelItemCount()):
-            it = self.tree.topLevelItem(i)
-            if it and it.text(0).lower() == want:
-                self.tree.setCurrentItem(it)
-                break
+/* Checkboxes */
+#TTSettingsRoot QCheckBox::indicator {
+    width: 14px; height: 14px; border-radius: 3px;
+    border: 1px solid #4a4a4a; background: #353535; }
+#TTSettingsRoot QCheckBox::indicator:checked { background: #2a82da; border-color: #2a82da; }
 
-    def _on_tree_changed(self, cur: QTreeWidgetItem, _prev: QTreeWidgetItem):
-        if not cur:
-            return
-        text = cur.text(0)
-        index = {"general": 0, "data & cache": 1, "performance": 2,
-                 "retries & backoff": 3, "help": 4}.get(text.lower(), 0)
-        self.stack.setCurrentIndex(index)
-        self.lblCrumb.setText(f"Settings  >  {text}")
+/* Footer */
+#TTSettingsRoot QWidget#footer { border-top: 1px solid #4a4a4a; }
 
-    def _filter_tree(self, q: str):
-        q = (q or "").strip().lower()
-        for i in range(self.tree.topLevelItemCount()):
-            it = self.tree.topLevelItem(i)
-            it.setHidden(bool(q) and q not in it.text(0).lower())
+/* Help text + mono chip */
+#TTSettingsRoot QLabel.helpSmall { color: #d0d0d0; }
+#TTSettingsRoot .mono {
+    background: #353535; padding: 1px 3px; border-radius: 3px;
+    border: 1px solid #4a4a4a; font-family: Consolas, 'Courier New', monospace; }
+
+/* Scroll area */
+#TTSettingsRoot QScrollArea { background: transparent; border: none; }
+#TTSettingsRoot QScrollArea QWidget#qt_scrollarea_viewport { background: transparent; }
+
+/* Scrollbars */
+#TTSettingsRoot QScrollBar:vertical { background: transparent; width: 11px; margin: 3px 2px; }
+#TTSettingsRoot QScrollBar::handle:vertical { background: #4a4a4a; border-radius: 6px; }
+#TTSettingsRoot QScrollBar::handle:vertical:hover { background: #5a7aa5; }
+            """
+        )
+
+    # --------------------- helpers ---------------------
 
     def _row(self, *widgets: QWidget) -> QWidget:
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
         for wd in widgets: h.addWidget(wd)
         return w
 
-    def _add_section(self, parent_layout: QVBoxLayout, title: str) -> QFormLayout:
-        ttl = QLabel(title); ttl.setStyleSheet("font-weight:600; color:#d5e7ff; padding:2px 0 4px 0")
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: rgba(255,255,255,0.1)")
-        wrap = QWidget(); form = QFormLayout(wrap)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setHorizontalSpacing(12); form.setVerticalSpacing(10)
-        form.setContentsMargins(10, 6, 6, 6)
-        parent_layout.addWidget(ttl); parent_layout.addWidget(sep); parent_layout.addWidget(wrap)
-        return form
+    def _inline_button(
+        self,
+        text: str,
+        *,
+        icon: Optional[QIcon] = None,
+        checkable: bool = False,
+        tooltip: str = "",
+        role: Optional[str] = None,
+    ) -> QToolButton:
+        btn = QToolButton()
+        btn.setText(text)
+        btn.setCheckable(checkable)
+        if icon and not icon.isNull():
+            btn.setIcon(icon)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        btn.setAutoRaise(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            btn.setToolTip(tooltip)
+        if role:
+            btn.setProperty("role", role)
+        return btn
 
-    def _build_pages_and_tree(self):
-        # Left nav
-        self.tree.clear()
-        for text in ("General", "Data & Cache", "Performance", "Retries & Backoff", "Help"):
-            self.tree.addTopLevelItem(QTreeWidgetItem([text]))
+    def _add_section(self, parent_layout: QVBoxLayout, title: str, subtitle: str = "") -> QFormLayout:
+        section = SettingsSection(title, subtitle, self)
+        parent_layout.addWidget(section)
+        return section.form
 
-        # Pages
-        # — General
-        pg_general = QWidget(); gl = QVBoxLayout(pg_general); gl.setContentsMargins(8, 8, 8, 8); gl.setSpacing(12)
+    def _wrap_scroll(self, widget: QWidget) -> QScrollArea:
+        sc = QScrollArea()
+        sc.setWidget(widget)
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.Shape.NoFrame)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        return sc
 
-        api_form = self._add_section(gl, "Torn API")
+    def _spacer(self) -> QWidget:
+        s = QWidget(); s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred); return s
+
+    def _bind_pair(self, spin: QSpinBox, slider: QSlider):
+        spin.valueChanged.connect(slider.setValue)
+        slider.valueChanged.connect(spin.setValue)
+        spin.valueChanged.connect(self._mark_dirty)
+        slider.valueChanged.connect(self._mark_dirty)
+
+        def maybe_update_pacing():
+            if hasattr(self, "sb_rate_cap") and spin in (
+                self.sb_rate_cap, self.sb_min_interval, self.sb_auto, self.sb_conc
+            ):
+                self._update_effective_pacing()
+
+        spin.valueChanged.connect(maybe_update_pacing)
+        slider.valueChanged.connect(maybe_update_pacing)
+
+    # --------------------- tabs & pages ---------------------
+
+    def _build_tabs(self):
+        style = self.style() or QApplication.style()
+
+        # -------- General
+        pg_general = QWidget()
+        gl = QVBoxLayout(pg_general); gl.setContentsMargins(8, 8, 8, 8); gl.setSpacing(8)
+
+        api_form = self._add_section(
+            gl, "Torn API",
+            "Paste your Limited Access key so Target Tracker can talk to Torn on your behalf."
+        )
         self.ed_api = QLineEdit(self._settings.get("api_key", ""))
         self.ed_api.setEchoMode(QLineEdit.EchoMode.Password)
         self.lbl_api_status = QLabel(""); self.lbl_api_status.setProperty("class", "helpSmall")
 
-        btn_show = QToolButton(); btn_show.setText("👁"); btn_show.setToolTip("Show / hide")
-        btn_show.setCheckable(True)
-        btn_show.toggled.connect(lambda ch: self.ed_api.setEchoMode(
-            QLineEdit.EchoMode.Normal if ch else QLineEdit.EchoMode.Password))
+        show_icon  = style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView) if style else QIcon()
+        paste_icon = style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton)     if style else QIcon()
+        open_icon  = style.standardIcon(QStyle.StandardPixmap.SP_DirLinkIcon)         if style else QIcon()
+        test_icon  = style.standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)   if style else QIcon()
 
-        btn_paste = QToolButton(); btn_paste.setText("📋"); btn_paste.setToolTip("Paste")
-        btn_paste.clicked.connect(self._paste_api)
+        btn_show  = self._inline_button("Show", icon=show_icon, checkable=True, tooltip="Show or hide the API key")
+        btn_show.toggled.connect(lambda ch: self.ed_api.setEchoMode(QLineEdit.EchoMode.Normal if ch else QLineEdit.EchoMode.Password))
+        btn_paste = self._inline_button("Paste", icon=paste_icon, tooltip="Paste from clipboard"); btn_paste.clicked.connect(self._paste_api)
+        btn_open  = self._inline_button("Open site", icon=open_icon,  tooltip="Open Torn API preferences"); btn_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(API_HELP_URL)))
+        self.btn_test = self._inline_button("Test key", icon=test_icon, tooltip="Ping Torn once to confirm the key", role="primary")
+        self.btn_test.clicked.connect(self._test_key)
 
-        btn_open = QToolButton(); btn_open.setText("↗"); btn_open.setToolTip("Open API page")
-        btn_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(API_HELP_URL)))
-
-        btn_test = QToolButton(); btn_test.setText("✓"); btn_test.setToolTip("Test key")
-        btn_test.clicked.connect(self._test_key)
-
-        api_form.addRow("API Key:", self._row(self.ed_api, btn_show, btn_paste, btn_open, btn_test))
+        api_form.addRow("API Key:", self._row(self.ed_api, btn_show, btn_paste, btn_open, self.btn_test))
         api_form.addRow("", self.lbl_api_status)
 
-        tgt_form = self._add_section(gl, "Targets & Window")
+        tgt_form = self._add_section(gl, "Targets & Window", "Choose where target.json lives and how the main window opens by default.")
         self.ed_targets = QLineEdit(self._settings.get("targets_file", "target.json"))
         self.lbl_targets_hint = QLabel(""); self.lbl_targets_hint.setProperty("class", "helpSmall")
-        btn_browse = QToolButton(); btn_browse.setText("📂"); btn_browse.setToolTip("Browse…")
-        btn_browse.clicked.connect(self._pick_targets)
-        btn_create = QToolButton(); btn_create.setText("＋"); btn_create.setToolTip("Create file")
-        btn_create.clicked.connect(self._create_targets_file)
-        self.chk_start_max = QCheckBox("Start maximized")
-        self.chk_start_max.setChecked(bool(self._settings.get("start_maximized", True)))
+        browse_icon = style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton) if style else QIcon()
+        create_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder) if style else QIcon()
+        btn_browse = self._inline_button("Browse…", icon=browse_icon, tooltip="Pick a targets JSON file"); btn_browse.clicked.connect(self._pick_targets)
+        btn_create = self._inline_button("Create", icon=create_icon, tooltip="Create a fresh targets file"); btn_create.clicked.connect(self._create_targets_file)
+        self.chk_start_max = QCheckBox("Start maximized"); self.chk_start_max.setChecked(bool(self._settings.get("start_maximized", True)))
 
         tgt_form.addRow("Targets file:", self._row(self.ed_targets, btn_browse, btn_create))
         tgt_form.addRow("", self.lbl_targets_hint)
         tgt_form.addRow("", self.chk_start_max)
 
         gl.addStretch(1)
+        self.tabs.addTab(self._wrap_scroll(pg_general), "General")
 
-        # — Data & Cache
-        pg_data = QWidget(); dl = QVBoxLayout(pg_data); dl.setContentsMargins(8, 8, 8, 8); dl.setSpacing(12)
+        # -------- Data & Cache
+        pg_data = QWidget()
+        dl = QVBoxLayout(pg_data); dl.setContentsMargins(8, 8, 8, 8); dl.setSpacing(8)
 
-        app_form = self._add_section(dl, "AppData")
+        app_form = self._add_section(dl, "AppData", "Quick access to the folder where settings, cache and ignore lists live.")
         self.ed_appdata = QLineEdit(get_appdata_dir()); self.ed_appdata.setReadOnly(True)
-        btn_open_folder = QToolButton(); btn_open_folder.setText("📂"); btn_open_folder.setToolTip("Open folder")
+        open_icon2 = style.standardIcon(QStyle.StandardPixmap.SP_DirLinkIcon) if style else QIcon()
+        btn_open_folder = self._inline_button("Open folder", icon=open_icon2, tooltip="Open AppData folder")
         btn_open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(get_appdata_dir())))
         app_form.addRow("", self._row(self.ed_appdata, btn_open_folder))
 
-        cache_form = self._add_section(dl, "Cache")
+        cache_form = self._add_section(dl, "Cache", "Control how often we persist API responses locally for faster restarts.")
         self.chk_load_cache = QCheckBox("Load cache at startup")
         self.chk_load_cache.setChecked(bool(self._settings.get("load_cache_at_start", True)))
-        self.sb_save_every = QSpinBox(); self.sb_save_every.setRange(5, 200)
-        self.sb_save_every.setValue(int(self._settings.get("save_cache_every", 20)))
-        self.sb_save_every.setSuffix(" updates")
+        self.sb_save_every = QSpinBox(); self.sb_save_every.setRange(5, 200); self.sb_save_every.setValue(int(self._settings.get("save_cache_every", 20))); self.sb_save_every.setSuffix(" updates")
         self.lbl_cache_info = QLabel(""); self.lbl_cache_info.setProperty("class", "helpSmall")
-        btn_clear_cache = QPushButton("Clear cache…")
-        btn_clear_cache.clicked.connect(self._clear_cache)
+        btn_clear_cache = QPushButton("Clear cache…"); btn_clear_cache.setProperty("role", "danger"); btn_clear_cache.clicked.connect(self._clear_cache)
+
         cache_form.addRow("", self.chk_load_cache)
         cache_form.addRow("Save cache every:", self.sb_save_every)
         cache_form.addRow("", self.lbl_cache_info)
         cache_form.addRow("", self._row(self._spacer(), btn_clear_cache))
         dl.addStretch(1)
+        self.tabs.addTab(self._wrap_scroll(pg_data), "Data & Cache")
 
-        # — Performance
-        pg_perf = QWidget(); pl = QVBoxLayout(pg_perf); pl.setContentsMargins(8, 8, 8, 8); pl.setSpacing(12)
+        # -------- Performance
+        pg_perf = QWidget()
+        pl = QVBoxLayout(pg_perf); pl.setContentsMargins(8, 8, 8, 8); pl.setSpacing(8)
 
         perf_grid = QWidget(); grid = QGridLayout(perf_grid)
-        grid.setContentsMargins(0, 0, 0, 0); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(10)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10); grid.setVerticalSpacing(8)
 
-        self.sb_conc = QSpinBox(); self.sb_conc.setRange(1, 16)
-        self.sb_conc.setValue(int(self._settings.get("concurrency", 4)))
+        self.sb_conc = QSpinBox(); self.sb_conc.setRange(1, 16); self.sb_conc.setValue(int(self._settings.get("concurrency", 4)))
         self.sl_conc = QSlider(Qt.Orientation.Horizontal); self.sl_conc.setRange(1, 16); self.sl_conc.setValue(self.sb_conc.value())
 
-        self.sb_auto = QSpinBox(); self.sb_auto.setRange(0, 3600); self.sb_auto.setSuffix(" sec")
-        self.sb_auto.setValue(int(self._settings.get("auto_refresh_sec", 0)))
+        self.sb_auto = QSpinBox(); self.sb_auto.setRange(0, 3600); self.sb_auto.setSuffix(" sec"); self.sb_auto.setValue(int(self._settings.get("auto_refresh_sec", 0)))
         self.sl_auto = QSlider(Qt.Orientation.Horizontal); self.sl_auto.setRange(0, 3600); self.sl_auto.setValue(self.sb_auto.value())
 
-        self.sb_rate_cap = QSpinBox(); self.sb_rate_cap.setRange(10, 200)
-        self.sb_rate_cap.setValue(int(self._settings.get("rate_max_per_min", 100)))
+        self.sb_rate_cap = QSpinBox(); self.sb_rate_cap.setRange(10, 200); self.sb_rate_cap.setValue(int(self._settings.get("rate_max_per_min", 100)))
         self.sl_rate_cap = QSlider(Qt.Orientation.Horizontal); self.sl_rate_cap.setRange(10, 200); self.sl_rate_cap.setValue(self.sb_rate_cap.value())
 
         self.sb_min_interval = QSpinBox(); self.sb_min_interval.setRange(0, 5000); self.sb_min_interval.setSuffix(" ms")
@@ -405,28 +497,25 @@ class SettingsDialog(QDialog):
 
         self.lbl_effective = QLabel(""); self.lbl_effective.setProperty("class", "helpSmall")
         self.lbl_estimate = QLabel(""); self.lbl_estimate.setProperty("class", "helpSmall")
-        btn_recommended = QPushButton("Recommended (Torn safe)")
-        btn_recommended.clicked.connect(self._apply_recommended)
+        btn_recommended = QPushButton("Use Torn-safe preset"); btn_recommended.setProperty("role", "primary"); btn_recommended.clicked.connect(self._apply_recommended)
 
-        perf_form = self._add_section(pl, "Performance")
+        perf_form = self._add_section(pl, "Performance", "Tune concurrency and pacing to respect Torn limits.")
         perf_form.addRow("", perf_grid)
         perf_form.addRow("", self.lbl_effective)
         perf_form.addRow("", self.lbl_estimate)
         perf_form.addRow("", self._row(self._spacer(), btn_recommended))
         pl.addStretch(1)
+        self.tabs.addTab(self._wrap_scroll(pg_perf), "Performance")
 
-        # — Retries & Backoff
-        pg_back = QWidget(); bl = QVBoxLayout(pg_back); bl.setContentsMargins(8, 8, 8, 8); bl.setSpacing(12)
+        # -------- Retries & Backoff
+        pg_back = QWidget()
+        bl = QVBoxLayout(pg_back); bl.setContentsMargins(8, 8, 8, 8); bl.setSpacing(8)
 
-        form = self._add_section(bl, "Retries & Backoff")
-        self.sb_max_retries = QSpinBox(); self.sb_max_retries.setRange(1, 12)
-        self.sb_max_retries.setValue(int(self._settings.get("max_retries", 8)))
-        self.sb_backoff_base = QSpinBox(); self.sb_backoff_base.setRange(0, 3000); self.sb_backoff_base.setSuffix(" ms")
-        self.sb_backoff_base.setValue(int(self._settings.get("backoff_base_ms", 600)))
-        self.sb_backoff_cap = QSpinBox(); self.sb_backoff_cap.setRange(1, 60); self.sb_backoff_cap.setSuffix(" s")
-        self.sb_backoff_cap.setValue(int(self._settings.get("backoff_cap_s", 8)))
-        self.chk_retry_after = QCheckBox("Honor Retry-After header")
-        self.chk_retry_after.setChecked(bool(self._settings.get("respect_retry_after", True)))
+        form = self._add_section(bl, "Retries & Backoff", "Control how we recover from 429s and transient Torn errors.")
+        self.sb_max_retries = QSpinBox(); self.sb_max_retries.setRange(1, 12); self.sb_max_retries.setValue(int(self._settings.get("max_retries", 8)))
+        self.sb_backoff_base = QSpinBox(); self.sb_backoff_base.setRange(0, 3000); self.sb_backoff_base.setSuffix(" ms"); self.sb_backoff_base.setValue(int(self._settings.get("backoff_base_ms", 600)))
+        self.sb_backoff_cap = QSpinBox(); self.sb_backoff_cap.setRange(1, 60); self.sb_backoff_cap.setSuffix(" s"); self.sb_backoff_cap.setValue(int(self._settings.get("backoff_cap_s", 8)))
+        self.chk_retry_after = QCheckBox("Honor Retry-After header"); self.chk_retry_after.setChecked(bool(self._settings.get("respect_retry_after", True)))
 
         form.addRow("Max retries:", self.sb_max_retries)
         form.addRow("Backoff base:", self.sb_backoff_base)
@@ -438,42 +527,27 @@ class SettingsDialog(QDialog):
         form.addRow("", self.lbl_backoff_hint)
         form.addRow("", self.lbl_backoff_table)
         bl.addStretch(1)
+        self.tabs.addTab(self._wrap_scroll(pg_back), "Retries & Backoff")
 
-        # — Help
-        pg_help = QWidget(); hl = QVBoxLayout(pg_help); hl.setContentsMargins(8, 8, 8, 8); hl.setSpacing(12)
-        help_form = self._add_section(hl, "Help")
-        help_box = QTextBrowser(); help_box.setOpenExternalLinks(True)
-        help_box.setHtml(self._help_html())
+        # -------- Help
+        pg_help = QWidget()
+        hl = QVBoxLayout(pg_help); hl.setContentsMargins(8, 8, 8, 8); hl.setSpacing(8)
+        help_form = self._add_section(hl, "Help", "Reference links, release notes and support.")
+        help_box = QTextBrowser(); help_box.setOpenExternalLinks(True); help_box.setHtml(self._help_html())
         help_form.addRow("", help_box)
         hl.addStretch(1)
+        self.tabs.addTab(self._wrap_scroll(pg_help), "Help")
 
-        # Stack
-        self.stack.addWidget(pg_general)   # 0
-        self.stack.addWidget(pg_data)      # 1
-        self.stack.addWidget(pg_perf)      # 2
-        self.stack.addWidget(pg_back)      # 3
-        self.stack.addWidget(pg_help)      # 4
-
-        # Init dynamic text + dirty tracking
+        # Init dynamic bits
         self._validate_api_key()
         self._update_targets_hint()
         self._update_cache_info()
         self._update_effective_pacing()
         self._update_backoff_preview()
         self._connect_dirty_signals()
+        self._refresh_header_summary()
 
-    # ───────────────────── utilities ─────────────────────
-
-    def _spacer(self) -> QWidget:
-        s = QWidget(); s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred); return s
-
-    def _bind_pair(self, spin: QSpinBox, slider: QSlider):
-        spin.valueChanged.connect(slider.setValue)
-        slider.valueChanged.connect(spin.setValue)
-        spin.valueChanged.connect(self._mark_dirty)
-        slider.valueChanged.connect(self._mark_dirty)
-        if hasattr(self, "sb_rate_cap") and spin in (self.sb_rate_cap, self.sb_min_interval, self.sb_auto, self.sb_conc):
-            spin.valueChanged.connect(self._update_effective_pacing)
+    # --------------------- logic (unchanged behavior) ---------------------
 
     def _connect_dirty_signals(self):
         for w in (
@@ -495,9 +569,18 @@ class SettingsDialog(QDialog):
             sb.valueChanged.connect(self._update_backoff_preview)
 
     def _mark_dirty(self):
-        self._dirty = True; self.btn_apply.setEnabled(True)
+        self._dirty = True
+        self.btn_apply.setEnabled(True)
+        self._refresh_header_summary()
 
-    # ───────────────────── actions ─────────────────────
+    def _refresh_header_summary(self):
+        target_path = (self.ed_targets.text().strip() if hasattr(self, "ed_targets") else "") or self._settings.get("targets_file", "target.json")
+        target_name = os.path.basename(target_path) or target_path or "target.json"
+        api_ok = _looks_like_api_key(self.ed_api.text().strip()) if hasattr(self, "ed_api") else False
+        api_state = "API key ready" if api_ok else "API key missing"
+        auto_val = int(self.sb_auto.value()) if hasattr(self, "sb_auto") else int(self._settings.get("auto_refresh_sec", 0))
+        auto_state = f"Auto refresh {auto_val}s" if auto_val else "Auto refresh off"
+        self.lblSummary.setText(f"{api_state}  •  Targets: {target_name}  •  {auto_state}")
 
     def _paste_api(self):
         try:
@@ -519,36 +602,90 @@ class SettingsDialog(QDialog):
         )
 
     def _test_key(self):
+        """Robust key test: no GUI access off-thread, timeouts & guaranteed cleanup."""
         key = self.ed_api.text().strip()
         if not key:
             self.lbl_api_status.setText("<span style='color:#ff9b8e'>No key entered.</span>")
             return
 
-        self.lbl_api_status.setText("<span class='helpSmall'>Testing…</span>")
+        honor_retry_after = bool(self.chk_retry_after.isChecked()) if hasattr(self, "chk_retry_after") else True
+
+        if hasattr(self, "btn_test"):
+            self.btn_test.setEnabled(False)
+            self.btn_test.setText("Testing…")
+
+        self.lbl_api_status.setText("<span class='helpSmall'>Testing against Torn…</span>")
 
         def worker():
+            import time
             url = f"https://api.torn.com/user/?selections=basic&key={key}"
+            headers = {"User-Agent": "TargetTracker/1.0 (+pyqt)"}
+            timeout = (6, 8)
+            max_attempts = 3
+            msg = ""
+
             try:
-                r = requests.get(url, timeout=6)
-                msg = ""
-                if r.ok:
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        r = requests.get(url, headers=headers, timeout=timeout)
+                    except requests.Timeout:
+                        msg = "<span style='color:#ff9b8e'>Timed out. Network slow?</span>"
+                        if attempt < max_attempts:
+                            time.sleep(0.6 * attempt)
+                            continue
+                        break
+                    except Exception as e:
+                        msg = f"<span style='color:#ff9b8e'>Request failed: {e}</span>"
+                        break
+
+                    if r.status_code == 429:
+                        wait_s = 0
+                        try:
+                            ra = r.headers.get("Retry-After")
+                            wait_s = int(float(ra)) if ra else 0
+                        except Exception:
+                            wait_s = 0
+                        if honor_retry_after and wait_s and attempt < max_attempts:
+                            msg_wait = f"<span style='color:#ffd27d'>Rate limited (429). Retrying in {min(wait_s,5)}s…</span>"
+                            QTimer.singleShot(0, lambda m=msg_wait: self.lbl_api_status.setText(m))
+                            time.sleep(min(wait_s, 5))
+                            continue
+                        else:
+                            msg = "<span style='color:#ff9b8e'>Rate limited (429). Try again shortly.</span>"
+                            break
+
+                    if not r.ok:
+                        msg = f"<span style='color:#ff9b8e'>HTTP {r.status_code} while checking key.</span>"
+                        if r.status_code >= 500 and attempt < max_attempts:
+                            time.sleep(0.6 * attempt)
+                            continue
+                        break
+
                     try:
                         data = r.json()
                     except Exception:
-                        data = {}
-                    if "error" in data:
-                        code = data["error"].get("code")
-                        desc = data["error"].get("error")
-                        msg = f"<span style='color:#ff9b8e'>API error {code}: {desc}</span>"
-                    else:
-                        name = data.get("name") or "OK"
-                        msg = f"<span style='color:#8ee6b3'>Valid. Hello, {name}.</span>"
-                else:
-                    msg = f"<span style='color:#ff9b8e'>HTTP {r.status_code} while checking key.</span>"
-            except Exception as e:
-                msg = f"<span style='color:#ff9b8e'>Request failed: {e}</span>"
+                        msg = "<span style='color:#ff9b8e'>Non-JSON response from Torn.</span>"
+                        break
 
-            QTimer.singleShot(0, lambda: self.lbl_api_status.setText(msg))
+                    if isinstance(data, dict) and "error" in data:
+                        code = data["error"].get("code")
+                        desc = data["error"].get("error") or "Unknown error"
+                        hint = " (Incorrect/expired key?)" if code in (1, 2) else (" (Temporarily rate-limited.)" if code in (5, 9) else "")
+                        msg = f"<span style='color:#ff9b8e'>API error {code}: {desc}{hint}</span>"
+                        break
+
+                    name = data.get("name") or "OK"
+                    pid = data.get("player_id")
+                    who = f"{name} (ID: {pid})" if pid else name
+                    msg = f"<span style='color:#8ee6b3'>Valid. Hello, {who}.</span>"
+                    break
+            finally:
+                def done():
+                    self.lbl_api_status.setText(msg or "<span style='color:#ff9b8e'>Test ended unexpectedly.</span>")
+                    if hasattr(self, "btn_test"):
+                        self.btn_test.setEnabled(True)
+                        self.btn_test.setText("Test key")
+                QTimer.singleShot(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -585,7 +722,7 @@ class SettingsDialog(QDialog):
         if abspath == "No path" or not os.path.exists(abspath):
             self.lbl_targets_hint.setText("<span style='color:#ff9b8e'>File not found. Click <b>Create</b> or choose an existing JSON.</span>")
         else:
-            self.lbl_targets_hint.setText(f"Path: <span class='mono'>{abspath}</span> • <b>{cnt}</b> target(s).")
+            self.lbl_targets_hint.setText(f"Path: <span class='mono'>{abspath}</span> | <b>{cnt}</b> target(s).")
 
     def _cache_info(self) -> Optional[str]:
         p = os.path.join(get_appdata_dir(), "cache_targets.json")
@@ -596,7 +733,7 @@ class SettingsDialog(QDialog):
             mtime = os.path.getmtime(p)
             from time import localtime, strftime
             ts = strftime("%Y-%m-%d %H:%M", localtime(mtime))
-            return f"Cache file: <span class='mono'>{p}</span> • {sz:.1f} KB • modified {ts}"
+            return f"Cache file: <span class='mono'>{p}</span> - {sz:.1f} KB - modified {ts}"
         except Exception:
             return f"Cache file: <span class='mono'>{p}</span>"
 
@@ -654,30 +791,30 @@ class SettingsDialog(QDialog):
         cap = int(self.sb_backoff_cap.value())
         retries = int(self.sb_max_retries.value())
         self.lbl_backoff_hint.setText(
-            f"Exponential backoff with jitter. Base: <b>{base}ms</b> • Cap: <b>{cap}s</b> • Retries: <b>{retries}</b>"
+            f"Exponential backoff with jitter. Base: <b>{base}ms</b> - Cap: <b>{cap}s</b> - Retries: <b>{retries}</b>"
         )
         series = self._backoff_series(base, cap, retries)
         cells = "".join(
-            f"<span style='padding:2px 8px;border:1px solid rgba(255,255,255,0.12);border-radius:6px;margin-right:6px'>#{i+1}: {s}s</span>"
+            f"<span style='padding:2px 6px;border:1px solid #4a4a4a;border-radius:4px;margin-right:4px'>#{i+1}: {s}s</span>"
             for i, s in enumerate(series)
         )
-        self.lbl_backoff_table.setText(f"<div style='margin-top:6px'>{cells}</div>")
+        self.lbl_backoff_table.setText(f"<div style='margin-top:4px'>{cells}</div>")
 
     def _help_html(self) -> str:
         return (
-            "<style>a{color:#4da3ff;text-decoration:none}a:hover{text-decoration:underline}"
-            "ul{margin-left:1.1em}code{background:#2e3338;padding:2px 4px;border-radius:4px}</style>"
+            "<style>a{color:#2a82da;text-decoration:none}a:hover{text-decoration:underline}"
+            "ul{margin-left:1.1em}code{background:#353535;padding:1px 3px;border-radius:3px;border:1px solid #4a4a4a}</style>"
             "<h3>Tips</h3>"
             "<ul>"
             "<li><b>API Key:</b> Use a <i>Limited Access</i> key. Stored locally only.</li>"
-            "<li><b>Rate Limits:</b> Keep ≤100/min or add a minimum interval to pace.</li>"
+            "<li><b>Rate Limits:</b> Keep &le; 100/min or add a minimum interval to pace.</li>"
             "<li><b>Recommended:</b> 100/min with 620ms interval is safe for Torn.</li>"
             "<li><b>Backoff:</b> Exponential with jitter; enable <i>Retry-After</i>.</li>"
             "</ul>"
             f"<p>Manage your key: <a href='{API_HELP_URL}'>{API_HELP_URL}</a></p>"
         )
 
-    # ───────────────────── save/apply ─────────────────────
+    # --------------------- save/apply ---------------------
 
     def _payload(self) -> Dict:
         return {
@@ -703,6 +840,7 @@ class SettingsDialog(QDialog):
         self._settings.update(payload)
         self._dirty = False
         self.btn_apply.setEnabled(False)
+        self._refresh_header_summary()
 
     def _save_and_close(self):
         self._apply()

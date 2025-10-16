@@ -30,20 +30,24 @@ class TargetInfo:
         return f"https://www.torn.com/profiles.php?XID={self.user_id}"
 
     def status_chip(self) -> str:
-        s = (self.status_state or "").strip().lower()
-        if "okay" in s:
+        state = (self.status_state or "").strip()
+        desc = (self.status_desc or "").strip()
+        combined = f"{state} {desc}".strip().lower()
+        if "okay" in combined:
             return "Okay"
-        if "hospital" in s:
+        if "hospital" in combined:
             return "Hospital"
-        if "federal" in s and "jail" in s:
+        if "federal" in combined and "jail" in combined:
             return "Federal Jail"
-        if "jail" in s:
+        if "jail" in combined:
             return "Jail"
-        if "travel" in s:
+        if "abroad" in combined:
+            return "Abroad"
+        if "travel" in combined:
             return "Traveling"
-        if "offline" in s:
+        if "offline" in combined:
             return "Offline"
-        return self.status_state or "Unknown"
+        return state or desc or "Unknown"
 
     def matches(self, text: str) -> bool:
         t = text.lower().strip()

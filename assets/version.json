@@ -1,1 +1,29 @@
-{"version": "2.6.0"}
+{
+  "schemaVersion": 2,
+  "generated": "2025-10-17T21:51:22Z",
+  "contact": "Skillerious — Robin Doak",
+  "apps": [
+    {
+      "id": "target-tracker",
+      "name": "TornTargetTracker",
+      "tracks": {
+        "stable": {
+          "version": "2.6.1",
+          "code": 20601,
+          "date": "2025-10-16",
+          "url": "https://github.com/skillerious/TornTargetTracker/releases/tag/V2.6.1",
+          "download": "https://github.com/skillerious/TornTargetTracker/releases/download/V2.6.1/Target.Tracker.Installer.exe",
+          "notes": "Settings dialog redesign, status color upgrades, fixes."
+        }
+      },
+      "history": [
+        {
+          "version": "2.6.0",
+          "code": 20600,
+          "date": "2025-10-14",
+          "url": "https://github.com/skillerious/TornTargetTracker/releases/tag/V2.6.0"
+        }
+      ]
+    }
+  ]
+}

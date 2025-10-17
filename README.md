@@ -24,9 +24,11 @@ Target Tracker reads **public player details via the Torn API** using your **per
 - **Status chip** — _Okay / Hospital / Jail / Abroad_ at a glance  
 - **Level** and **last seen / last action** timestamps  
 - **Batch refresh** with a **configurable concurrency** (fast but API‑friendly)  
-- **Local caching** to avoid unnecessary re‑fetches between runs  
+- **Local caching** to avoid unnecessary re-fetches between runs  
 - **Ignore list** support (skip IDs you don’t want to monitor)  
-- **In‑app target editor** to **add/edit targets** during onboarding or anytime
+- **In-app target editor** to **add/edit targets** during onboarding or anytime  
+- **One-click exports** — produce CSV or JSON snapshots whenever you need them  
+- **Built-in documentation** — Help → Open Documentation launches a full walkthrough  
 - **Polished PyQt6 UI** with a compact, dark layout  
 
 > This is a community tool built for convenience. It only reads data you permit via your API key and never posts to Torn.
@@ -44,13 +46,14 @@ Target Tracker reads **public player details via the Torn API** using your **per
 ---
 
 ## 🧩 Features in detail
-- **In‑app onboarding** — paste your API key, choose/create your targets file, and **add targets immediately** (paste or import).
+- **In-app onboarding** — paste your API key, choose/create your targets file, and **add targets immediately** (paste or import).
 - **Targets from file** — point the app at your `target.json` file (a list of Torn user IDs) and it’ll track them automatically.
 - **Configurable concurrency** — choose how many parallel requests you want to run (default is safe and conservative).
-- **Auto‑refresh** — optional; refresh on a timer or run manual refreshes as needed.
-- **Local cache** — keeps recent results on disk so restarts are instant and API‑friendly.
+- **Hands-off refresh cadence** — every batch schedules the next pull 65 s later (or your custom interval).
+- **Local cache** — keeps recent results on disk so restarts are instant and API-friendly.
 - **Ignore list** — place player IDs in `ignore.json` to exclude them from checks.
-- **Safe by design** — built‑in rate‑limiter to play nicely with Torn API limits.
+- **Inline help** — open the Documentation dialog from the Help menu for a full walkthrough.
+- **Safe by design** — built-in rate-limiter to play nicely with Torn API limits.
 
 ---
 
@@ -143,7 +146,7 @@ Target file format (JSON array of Torn user IDs):
 | **Targets file** | Path to `target.json` with the IDs you want to monitor. |
 | **Add Targets** | Opens the in‑app editor to paste/import IDs (creates or updates `target.json`). |
 | **Concurrency** | How many parallel lookups to run (keep modest to respect rate limits). |
-| **Auto‑refresh** | Optional timer (seconds) to refresh in the background. |
+| **Auto refresh** | Seconds between batches (defaults to 65 s if blank). |
 | **Load cache at start** | Re‑use cached results on launch for instant UI. |
 
 All settings are stored in your user config directory (e.g., `%APPDATA%\TargetTracker\`). You can re‑open the **Settings** dialog anytime from the toolbar.
@@ -159,9 +162,10 @@ All settings are stored in your user config directory (e.g., `%APPDATA%\TargetTr
 
 ## 🐞 Troubleshooting
 - `ModuleNotFoundError: No module named 'PyQt6'` → run `pip install -r requirements.txt` (or `pip install PyQt6`).
-- API calls failing or slow → lower **Concurrency** and/or disable **Auto‑refresh** to stay within limits.
+- API calls failing or slow → lower **Concurrency** and/or increase the **Auto refresh** interval to stay within limits.
 - Empty table → add targets via onboarding or **Add Targets** dialog; ensure the IDs are numeric.
-- Wrong or expired key → open **Settings**, paste a fresh API key, and save.
+- Wrong or expired key → open **Settings**, paste a fresh API key, use **Test key**, and save.
+- Need a refresher? → Help → **Open Documentation** launches the built-in walkthrough.
 
 ---
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import logging
 import threading
@@ -62,7 +63,9 @@ class Controller(QObject):
 
         # Auto-refresh
         self._auto_timer = QTimer(self)
+        self._auto_timer.setSingleShot(True)
         self._auto_timer.timeout.connect(self.refresh)
+        self._auto_interval = 65  # seconds
 
         # UI status callbacks (set from MainWindow)
         self._set_status: Optional[Callable[[str], None]] = None
@@ -82,6 +85,7 @@ class Controller(QObject):
         # Wire view events
         self.view.request_refresh.connect(self.refresh)
         self.view.request_export.connect(self.export_csv)
+        self.view.request_export_json.connect(self.export_json)
         self.view.request_open_settings.connect(self.show_settings)
         self.view.request_manage_ignore.connect(self.show_ignore)
         self.view.request_load_targets.connect(self.pick_targets_file)
@@ -184,6 +188,8 @@ class Controller(QObject):
             logger.warning("Refresh skipped: fetch already in progress.")
             return
 
+        self._auto_timer.stop()
+
         ids = self.targets_list()
         self._current_target_set = set(ids)
         total = len(ids)
@@ -272,13 +278,14 @@ class Controller(QObject):
             logger.info("Batch finished. Total=%d, errors=%d; cache saved.", total, self._errors)
 
             self._fetcher = None
+            self._schedule_next_auto_refresh()
 
         fetcher.signals.one_done.connect(on_one)
         fetcher.signals.one_done.connect(lambda *_: fetcher.dec_and_maybe_finish())
         fetcher.signals.batch_done.connect(on_done)
         fetcher.fetch_ids(ids)
 
-    # ---------------- CSV Export ----------------
+    # ---------------- Exports ----------------
 
     def export_csv(self):
         if not self.rows:
@@ -303,8 +310,22 @@ class Controller(QObject):
                     r.last_action_relative or r.last_action_status or "",
                     r.error or ""
                 ])
-        self._status("Export complete.")
+        self._status("CSV export complete.")
         logger.info("Exported CSV to %r", path)
+
+    def export_json(self):
+        if not self.rows:
+            QMessageBox.information(self.view, "Export JSON", "Nothing to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self.view, "Export JSON", "targets.json", "JSON (*.json)")
+        if not path:
+            return
+        ids = [int(r.user_id) for r in self.rows if r.user_id is not None]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(ids, f, indent=2)
+            f.write("\n")
+        self._status("JSON export complete.")
+        logger.info("Exported JSON to %r", path)
 
     # ---------------- Dialogs ----------------
 
@@ -428,13 +449,25 @@ class Controller(QObject):
     # ---------------- Auto refresh ----------------
 
     def _update_auto_timer(self):
-        sec = int(self.settings.get("auto_refresh_sec", 0))
-        if sec > 0:
-            self._auto_timer.start(1000 * sec)
-            logger.info("Auto-refresh enabled: every %s second(s)", sec)
+        user_sec = int(self.settings.get("auto_refresh_sec", 0))
+        if user_sec > 0:
+            self._auto_interval = user_sec
+            logger.info("Auto-refresh interval (settings): %s second(s)", user_sec)
         else:
-            self._auto_timer.stop()
-            logger.info("Auto-refresh disabled")
+            self._auto_interval = 65
+            logger.info("Auto-refresh interval set to default: %s second(s)", self._auto_interval)
+        self._auto_timer.stop()
+
+    def _schedule_next_auto_refresh(self):
+        if self._shutdown_event.is_set():
+            return
+        if self._auto_interval <= 0:
+            return
+        if not self._current_target_set:
+            return
+        self._auto_timer.stop()
+        self._auto_timer.start(self._auto_interval * 1000)
+        logger.info("Next auto refresh scheduled in %s second(s)", self._auto_interval)
 
     # ---------------- First-run helpers ----------------
 

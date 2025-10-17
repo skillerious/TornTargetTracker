@@ -1,4 +1,16 @@
+# build artifacts
+/build/
+/dist/
+*.spec
+
+# python
 __pycache__/
 *.pyc
-.venv/
+
+# app state
+settings.json
+ignore.json
+target.json
+
+# virtualenv
 venv/

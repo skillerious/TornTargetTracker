@@ -17,39 +17,70 @@ from typing import List, Set, Dict, Optional, Tuple, NamedTuple
 from search_bar import SearchBar
 
 
-
 import requests
 
 
-
 from PyQt6.QtCore import (
-
-    Qt, QAbstractTableModel, QModelIndex, QVariant, QSortFilterProxyModel,
-
-    pyqtSignal, QUrl, QSize, QTimer, QItemSelectionModel, QDateTime
-
+    Qt,
+    QAbstractTableModel,
+    QModelIndex,
+    QVariant,
+    QSortFilterProxyModel,
+    pyqtSignal,
+    QUrl,
+    QSize,
+    QTimer,
+    QItemSelectionModel,
+    QDateTime,
 )
 
-from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QFont, QPixmap, QPainter, QPen, QBrush, QColor
+from PyQt6.QtGui import (
+    QAction,
+    QDesktopServices,
+    QIcon,
+    QFont,
+    QPixmap,
+    QPainter,
+    QPen,
+    QBrush,
+    QColor,
+)
 
 from PyQt6.QtWidgets import (
-
-    QWidget, QVBoxLayout, QHBoxLayout, QTableView, QLineEdit, QToolBar, QCheckBox,
-
-    QPushButton, QMenu, QFileDialog, QDialog, QFormLayout, QSpinBox, QLabel,
-
-    QGroupBox, QTextBrowser, QListWidgetItem, QListWidget, QTableWidget,
-
-    QTableWidgetItem, QFrame, QToolButton, QComboBox, QTabWidget, QStyle, QHeaderView, QApplication, QSizePolicy
-
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTableView,
+    QLineEdit,
+    QToolBar,
+    QCheckBox,
+    QPushButton,
+    QMenu,
+    QFileDialog,
+    QDialog,
+    QFormLayout,
+    QSpinBox,
+    QLabel,
+    QGroupBox,
+    QTextBrowser,
+    QListWidgetItem,
+    QListWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QFrame,
+    QToolButton,
+    QComboBox,
+    QTabWidget,
+    QStyle,
+    QHeaderView,
+    QApplication,
+    QSizePolicy,
 )
-
 
 
 from models import TargetInfo
 
 from storage import get_appdata_dir
-
 
 
 # -----------------------------------------------------------------------------
@@ -64,12 +95,13 @@ if not log.handlers:
 
     _h = logging.StreamHandler()
 
-    _h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+    _h.setFormatter(
+        logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+    )
 
     log.addHandler(_h)
 
     log.setLevel(logging.INFO)
-
 
 
 about_log = logging.getLogger("TargetTracker.About")
@@ -78,26 +110,34 @@ if not about_log.handlers:
 
     _h2 = logging.StreamHandler()
 
-    _h2.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+    _h2.setFormatter(
+        logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+    )
 
     about_log.addHandler(_h2)
 
     about_log.setLevel(logging.INFO)
 
 
-
 # Optional GitHub token for higher rate limits (Fine-grained PAT â- ' Contents: Read-only)
 
 # NOTE: You asked to hardcode this token. It's embedded below exactly as provided.
 
-GITHUB_TOKEN = "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"
+VERSION_TRACKER_BASE = "https://skillerious.github.io/Version-Tracker/index.html"
+VERSION_APP_ID = "target-tracker"
 
 
-
-COLUMNS = ["Name", "ID", "Level", "Status", "Details", "Until", "Faction", "Last Action", "Error"]
-
-
-
+COLUMNS = [
+    "Name",
+    "ID",
+    "Level",
+    "Status",
+    "Details",
+    "Until",
+    "Faction",
+    "Last Action",
+    "Error",
+]
 
 
 class LastActionPalette(NamedTuple):
@@ -115,33 +155,18 @@ class LastActionPalette(NamedTuple):
     accent_hex: str
 
 
-
-
-
 # Buckets ordered from freshest to stalest for consistent styling + legend output.
 
 LAST_ACTION_BUCKETS: List[Tuple[str, float, str, int, bool]] = [
-
     ("Now", 180, "#2dd4bf", 90, True),
-
     ("<15m", 900, "#22c55e", 80, True),
-
     ("<1h", 3600, "#fbbf24", 70, False),
-
     ("<4h", 14400, "#f97316", 60, False),
-
     ("<12h", 43200, "#38bdf8", 50, False),
-
     ("<24h", 86400, "#818cf8", 45, False),
-
     ("1d+", 172800, "#c084fc", 40, False),
-
     ("3d+", float("inf"), "#94a3b8", 35, False),
-
 ]
-
-
-
 
 
 def _color_with_alpha(hex_code: str, alpha: int) -> QColor:
@@ -151,9 +176,6 @@ def _color_with_alpha(hex_code: str, alpha: int) -> QColor:
     color.setAlpha(max(0, min(255, alpha)))
 
     return color
-
-
-
 
 
 def last_action_palette(text: str) -> Optional[LastActionPalette]:
@@ -170,8 +192,6 @@ def last_action_palette(text: str) -> Optional[LastActionPalette]:
 
         return None
 
-
-
     seconds = TargetsModel._relative_to_seconds(raw)
 
     if seconds >= 10**8:
@@ -180,15 +200,11 @@ def last_action_palette(text: str) -> Optional[LastActionPalette]:
 
         return None
 
-
-
     # If Torn reports "offline" we bias towards the stalest bucket regardless of seconds.
 
     if "offline" in lowered:
 
         seconds = max(seconds, 200000)
-
-
 
     for label, cutoff, accent_hex, bg_alpha, bold in LAST_ACTION_BUCKETS:
 
@@ -204,12 +220,11 @@ def last_action_palette(text: str) -> Optional[LastActionPalette]:
 
             dot.setAlpha(245)
 
-            return LastActionPalette(fg=fg, bg=bg, dot=dot, bold=bold, label=label, accent_hex=accent_hex)
+            return LastActionPalette(
+                fg=fg, bg=bg, dot=dot, bold=bold, label=label, accent_hex=accent_hex
+            )
 
     return None
-
-
-
 
 
 def last_action_legend_html(compact: bool = False) -> str:
@@ -218,22 +233,20 @@ def last_action_legend_html(compact: bool = False) -> str:
 
     if compact:
 
-        picks = [LAST_ACTION_BUCKETS[0], LAST_ACTION_BUCKETS[2], LAST_ACTION_BUCKETS[-1]]
+        picks = [
+            LAST_ACTION_BUCKETS[0],
+            LAST_ACTION_BUCKETS[2],
+            LAST_ACTION_BUCKETS[-1],
+        ]
 
     else:
 
         picks = [
-
             LAST_ACTION_BUCKETS[0],
-
             LAST_ACTION_BUCKETS[1],
-
             LAST_ACTION_BUCKETS[2],
-
             LAST_ACTION_BUCKETS[4],
-
             LAST_ACTION_BUCKETS[-1],
-
         ]
 
     parts = []
@@ -241,29 +254,22 @@ def last_action_legend_html(compact: bool = False) -> str:
     for label, _cutoff, accent, _bg_alpha, _bold in picks:
 
         parts.append(
-
             "<span style='display:inline-flex;align-items:center;margin-right:14px;'>"
-
             f"<span style='width:10px;height:10px;border-radius:5px;background:{accent};"
-
             "display:inline-block;margin-right:6px;'></span>"
-
             f"<span style='color:{accent};font-weight:600;'>{label}</span>"
-
             "</span>"
-
         )
 
-    return ''.join(parts)
-
+    return "".join(parts)
 
 
 # ---------- URL helpers ----------
 
+
 def profile_url(uid: int) -> str:
 
     return f"https://www.torn.com/profiles.php?XID={int(uid)}"
-
 
 
 def attack_url(uid: int) -> str:
@@ -271,8 +277,8 @@ def attack_url(uid: int) -> str:
     return f"https://www.torn.com/loader.php?sid=attack&user2ID={int(uid)}"
 
 
-
 # ---------- PyInstaller-safe assets ----------
+
 
 def asset_path(rel: str) -> str:
 
@@ -289,19 +295,13 @@ def asset_path(rel: str) -> str:
     return cand if os.path.exists(cand) else rel
 
 
-
 def _icon_path(name: str) -> Optional[str]:
 
     for p in (
-
         asset_path(os.path.join("assets", f"ic-{name}.svg")),
-
         asset_path(os.path.join("assets", f"ic-{name}.png")),
-
         asset_path(f"ic-{name}.svg"),
-
         asset_path(f"ic-{name}.png"),
-
     ):
 
         if os.path.exists(p):
@@ -311,13 +311,11 @@ def _icon_path(name: str) -> Optional[str]:
     return None
 
 
-
 def icon(name: str) -> QIcon:
 
     p = _icon_path(name)
 
     return QIcon(p) if p else QIcon()
-
 
 
 # ======================================================================
@@ -327,9 +325,7 @@ def icon(name: str) -> QIcon:
 # ======================================================================
 
 
-
 class TargetsModel(QAbstractTableModel):
-
     def __init__(self):
 
         super().__init__()
@@ -338,14 +334,11 @@ class TargetsModel(QAbstractTableModel):
 
         self._ignored: Set[int] = set()
 
-        self._idx_by_uid: Dict[int, int] = {}   # fast lookup for upserts
-
-
+        self._idx_by_uid: Dict[int, int] = {}  # fast lookup for upserts
 
     # ---------- helpers ----------
 
     @staticmethod
-
     def _relative_to_seconds(text: str) -> int:
 
         """
@@ -368,11 +361,7 @@ class TargetsModel(QAbstractTableModel):
 
             return 10**9
 
-
-
         s = text.strip().lower()
-
-
 
         if "online" in s:
 
@@ -390,29 +379,27 @@ class TargetsModel(QAbstractTableModel):
 
             return 10**9
 
-
-
         s = s.replace("ago", " ").replace(",", " ")
 
         repl = {
-
-            "minutes": "m", "minute": "m", "mins": "m", "min": "m", "m ": "m ",
-
-            "hours": "h", "hour": "h",
-
-            "days": "d", "day": "d",
-
-            "weeks": "w", "week": "w",
-
-            "seconds": "s", "second": "s",
-
+            "minutes": "m",
+            "minute": "m",
+            "mins": "m",
+            "min": "m",
+            "m ": "m ",
+            "hours": "h",
+            "hour": "h",
+            "days": "d",
+            "day": "d",
+            "weeks": "w",
+            "week": "w",
+            "seconds": "s",
+            "second": "s",
         }
 
         for k, v in repl.items():
 
             s = s.replace(k, v)
-
-
 
         total = 0
 
@@ -420,21 +407,24 @@ class TargetsModel(QAbstractTableModel):
 
             n = int(val)
 
-            if unit == "w": total += n * 7 * 24 * 3600
+            if unit == "w":
+                total += n * 7 * 24 * 3600
 
-            elif unit == "d": total += n * 24 * 3600
+            elif unit == "d":
+                total += n * 24 * 3600
 
-            elif unit == "h": total += n * 3600
+            elif unit == "h":
+                total += n * 3600
 
-            elif unit == "m": total += n * 60
+            elif unit == "m":
+                total += n * 60
 
-            elif unit == "s": total += n
+            elif unit == "s":
+                total += n
 
         if total > 0:
 
             return total
-
-
 
         try:
 
@@ -444,29 +434,30 @@ class TargetsModel(QAbstractTableModel):
 
             return 10**9
 
-
-
     @staticmethod
-
     def _status_rank(chip: str) -> int:
 
         c = (chip or "").lower()
 
-        if "okay" in c: return 0
+        if "okay" in c:
+            return 0
 
-        if "hospital" in c: return 1
+        if "hospital" in c:
+            return 1
 
-        if "jail" in c and "federal" in c: return 2
+        if "jail" in c and "federal" in c:
+            return 2
 
-        if "jail" in c: return 3
+        if "jail" in c:
+            return 3
 
-        if "abroad" in c: return 4
+        if "abroad" in c:
+            return 4
 
-        if "travel" in c: return 5
+        if "travel" in c:
+            return 5
 
         return 6
-
-
 
     @staticmethod
     def _status_color(chip: str) -> QColor:
@@ -481,7 +472,7 @@ class TargetsModel(QAbstractTableModel):
             return QColor("#ffe066")  # yellow for federal jail rows
         if "jail" in c:
             return QColor("#ffe066")  # yellow for jail rows
-        return QColor("#78c878")      # green for okay/other statuses
+        return QColor("#78c878")  # green for okay/other statuses
 
     # ---------- model core ----------
 
@@ -494,8 +485,6 @@ class TargetsModel(QAbstractTableModel):
         self._idx_by_uid = {r.user_id: i for i, r in enumerate(self._rows)}
 
         self.endResetModel()
-
-
 
     def upsert(self, info: TargetInfo):
 
@@ -525,23 +514,18 @@ class TargetsModel(QAbstractTableModel):
 
             br = self.index(idx, self.columnCount() - 1)
 
-            self.dataChanged.emit(tl, br, [
-
-                Qt.ItemDataRole.DisplayRole,
-
-                Qt.ItemDataRole.DecorationRole,
-
-                Qt.ItemDataRole.ForegroundRole,
-
-                Qt.ItemDataRole.FontRole,
-
-                Qt.ItemDataRole.UserRole,
-
-                Qt.ItemDataRole.ToolTipRole,
-
-            ])
-
-
+            self.dataChanged.emit(
+                tl,
+                br,
+                [
+                    Qt.ItemDataRole.DisplayRole,
+                    Qt.ItemDataRole.DecorationRole,
+                    Qt.ItemDataRole.ForegroundRole,
+                    Qt.ItemDataRole.FontRole,
+                    Qt.ItemDataRole.UserRole,
+                    Qt.ItemDataRole.ToolTipRole,
+                ],
+            )
 
     def set_ignored(self, ids: Set[int]):
 
@@ -551,45 +535,38 @@ class TargetsModel(QAbstractTableModel):
 
             tl = self.index(0, 0)
 
-            br = self.index(max(0, len(self._rows)-1), self.columnCount()-1)
+            br = self.index(max(0, len(self._rows) - 1), self.columnCount() - 1)
 
-            self.dataChanged.emit(tl, br, [
-
-                Qt.ItemDataRole.DecorationRole,
-
-                Qt.ItemDataRole.DisplayRole,
-
-                Qt.ItemDataRole.ForegroundRole,
-
-                Qt.ItemDataRole.FontRole,
-
-                Qt.ItemDataRole.UserRole
-
-            ])
-
-
+            self.dataChanged.emit(
+                tl,
+                br,
+                [
+                    Qt.ItemDataRole.DecorationRole,
+                    Qt.ItemDataRole.DisplayRole,
+                    Qt.ItemDataRole.ForegroundRole,
+                    Qt.ItemDataRole.FontRole,
+                    Qt.ItemDataRole.UserRole,
+                ],
+            )
 
     def rowCount(self, parent=QModelIndex()) -> int:
 
         return len(self._rows)
 
-
-
     def columnCount(self, parent=QModelIndex()) -> int:
 
         return len(COLUMNS)
 
-
-
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
 
-        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+        if (
+            role == Qt.ItemDataRole.DisplayRole
+            and orientation == Qt.Orientation.Horizontal
+        ):
 
             return COLUMNS[section]
 
         return QVariant()
-
-
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
 
@@ -606,8 +583,6 @@ class TargetsModel(QAbstractTableModel):
         r = self._rows[row]
 
         c = index.column()
-
-
 
         last_rel = r.last_action_relative or ""
 
@@ -630,8 +605,6 @@ class TargetsModel(QAbstractTableModel):
         last_palette = last_action_palette(last_rel or last_status)
 
         dash = "-"
-
-
 
         # Sort role
 
@@ -677,15 +650,11 @@ class TargetsModel(QAbstractTableModel):
 
             return ""
 
-
-
         if role == Qt.ItemDataRole.DecorationRole:
 
             if c == 0 and r.user_id in self._ignored:
 
                 return icon("block-red")
-
-
 
         if role == Qt.ItemDataRole.ForegroundRole:
 
@@ -698,8 +667,6 @@ class TargetsModel(QAbstractTableModel):
             if status_color is not None:
 
                 return QBrush(status_color)
-
-
 
         if role == Qt.ItemDataRole.FontRole:
 
@@ -718,8 +685,6 @@ class TargetsModel(QAbstractTableModel):
                 f.setBold(True)
 
                 return f
-
-
 
         if role == Qt.ItemDataRole.DisplayRole:
 
@@ -759,13 +724,9 @@ class TargetsModel(QAbstractTableModel):
 
                 return r.error or ""
 
-
-
         if role == Qt.ItemDataRole.TextAlignmentRole and c in (1, 2, 5):
 
             return Qt.AlignmentFlag.AlignCenter
-
-
 
         if role == Qt.ItemDataRole.ToolTipRole:
 
@@ -774,27 +735,18 @@ class TargetsModel(QAbstractTableModel):
             status_desc = r.status_desc or dash
 
             tip = [
-
                 f"<b>{r.name or dash}</b> [{r.user_id}]",
-
                 f"Level: {r.level if r.level is not None else dash}",
-
                 f"Status: {status_chip} - {status_desc}",
-
                 f"Until: {r.until_human() or dash}",
-
                 f"Faction: {r.faction or dash}",
-
                 f"Last Action: {last_display or dash}",
-
             ]
 
             if last_palette:
 
                 tip.append(
-
                     f"<b>Recency:</b> <span style='color:{last_palette.dot.name()};'>{last_palette.label}</span>"
-
                 )
 
             if r.error:
@@ -811,16 +763,9 @@ class TargetsModel(QAbstractTableModel):
 
         return QVariant()
 
-
-
     def row(self, idx: int) -> TargetInfo:
 
         return self._rows[idx]
-
-
-
-
-
 
 
 # ======================================================================
@@ -830,16 +775,19 @@ class TargetsModel(QAbstractTableModel):
 # ======================================================================
 
 
-
 class FilterProxy(QSortFilterProxyModel):
-
     def __init__(self):
 
         super().__init__()
 
         self.setDynamicSortFilter(False)
 
-        self.search_query = {"text": "", "mode": "all", "regex": False, "case_sensitive": False}
+        self.search_query = {
+            "text": "",
+            "mode": "all",
+            "regex": False,
+            "case_sensitive": False,
+        }
 
         self.show_okay = True
 
@@ -859,15 +807,11 @@ class FilterProxy(QSortFilterProxyModel):
 
         self.level_max = 100
 
-
-
     def set_search_query(self, q: dict):
 
         self.search_query = q or self.search_query
 
         self.invalidateFilter()
-
-
 
     def set_flags(self, **flags):
 
@@ -877,31 +821,28 @@ class FilterProxy(QSortFilterProxyModel):
 
         self.invalidateFilter()
 
-
-
     def set_ignored(self, ids: Set[int]):
 
         self._ignored = set(ids)
 
         self.invalidateFilter()
 
-
-
     def set_level_bounds(self, lo: int, hi: int):
 
-        self.level_min = int(lo); self.level_max = int(hi)
+        self.level_min = int(lo)
+        self.level_max = int(hi)
 
         self.invalidateFilter()
-
-
 
     # util
 
     def _match_text(self, text: str, hay: str, regex: bool, case: bool) -> bool:
 
-        if hay is None: return False
+        if hay is None:
+            return False
 
-        if not text: return True
+        if not text:
+            return True
 
         if regex:
 
@@ -917,15 +858,11 @@ class FilterProxy(QSortFilterProxyModel):
 
         return (text in hay) if case else (text.lower() in hay.lower())
 
-
-
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
 
         m: TargetsModel = self.sourceModel()  # type: ignore
 
         r = m.row(source_row)
-
-
 
         # Search handling
 
@@ -939,43 +876,37 @@ class FilterProxy(QSortFilterProxyModel):
 
         case = bool(q.get("case_sensitive", False))
 
-
-
         if txt:
 
             if mode == "id":
 
-                if not self._match_text(txt, str(r.user_id), regex, case): return False
+                if not self._match_text(txt, str(r.user_id), regex, case):
+                    return False
 
             elif mode == "name":
 
-                if not self._match_text(txt, r.name or "", regex, case): return False
+                if not self._match_text(txt, r.name or "", regex, case):
+                    return False
 
             elif mode == "faction":
 
-                if not self._match_text(txt, r.faction or "", regex, case): return False
+                if not self._match_text(txt, r.faction or "", regex, case):
+                    return False
 
             else:  # all
 
                 hit = (
-
-                    self._match_text(txt, r.name or "", regex, case) or
-
-                    self._match_text(txt, str(r.user_id), regex, case) or
-
-                    self._match_text(txt, r.faction or "", regex, case)
-
+                    self._match_text(txt, r.name or "", regex, case)
+                    or self._match_text(txt, str(r.user_id), regex, case)
+                    or self._match_text(txt, r.faction or "", regex, case)
                 )
 
-                if not hit: return False
-
-
+                if not hit:
+                    return False
 
         if self.hide_ignored and r.user_id in self._ignored:
 
             return False
-
-
 
         lvl = r.level if r.level is not None else 0
 
@@ -983,28 +914,27 @@ class FilterProxy(QSortFilterProxyModel):
 
             return False
 
-
-
         chip = (r.status_chip() or "").lower()
 
-        if ("okay" in chip and not self.show_okay): return False
+        if "okay" in chip and not self.show_okay:
+            return False
 
-        if ("hospital" in chip and not self.show_hospital): return False
+        if "hospital" in chip and not self.show_hospital:
+            return False
 
-        if ("jail" in chip and not self.show_jail): return False
+        if "jail" in chip and not self.show_jail:
+            return False
 
-        if ("federal" in chip and not self.show_federal): return False
+        if "federal" in chip and not self.show_federal:
+            return False
 
-        if ("travel" in chip and not self.show_traveling): return False
+        if "travel" in chip and not self.show_traveling:
+            return False
 
         return True
 
 
-
 from settings_dialog import SettingsDialog
-
-
-
 
 
 # ======================================================================
@@ -1012,7 +942,6 @@ from settings_dialog import SettingsDialog
 #                           IGNORE DIALOGS
 
 # ======================================================================
-
 
 
 class IgnoreDialog(QDialog):
@@ -1043,25 +972,17 @@ class IgnoreDialog(QDialog):
 
         self.resize(760, 520)
 
-
-
         self.ignored = set(ignored)
 
         self.info_map: Dict[int, TargetInfo] = {i.user_id: i for i in infos}
 
-
-
         self._apply_styles()
-
-
 
         root = QVBoxLayout(self)
 
         root.setContentsMargins(10, 10, 10, 10)
 
         root.setSpacing(8)
-
-
 
         # -- Header (search + count pill)
 
@@ -1075,13 +996,13 @@ class IgnoreDialog(QDialog):
 
         self.search.setClearButtonEnabled(True)
 
-        act_left = self.search.addAction(icon("search"), QLineEdit.ActionPosition.LeadingPosition)
+        act_left = self.search.addAction(
+            icon("search"), QLineEdit.ActionPosition.LeadingPosition
+        )
 
         act_left.setToolTip("Search")
 
         self.search.textChanged.connect(self._filter_table)
-
-
 
         self.lbl_count = QLabel("")
 
@@ -1091,18 +1012,16 @@ class IgnoreDialog(QDialog):
 
         self.lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-
-
         self.last_action_legend = QLabel(last_action_legend_html(compact=True))
         self.last_action_legend.setObjectName("lastActionLegend")
         self.last_action_legend.setTextFormat(Qt.TextFormat.RichText)
         self.last_action_legend.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.last_action_legend.setStyleSheet("font-size: 12px;")
-        self.last_action_legend.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.last_action_legend.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred
+        )
 
         self.last_action_legend.setWordWrap(False)
-
-
 
         header.addWidget(self.search, 1)
 
@@ -1115,8 +1034,6 @@ class IgnoreDialog(QDialog):
         header.addWidget(self.lbl_count, 0, Qt.AlignmentFlag.AlignRight)
 
         root.addLayout(header)
-
-
 
         # -- Table
 
@@ -1146,25 +1063,23 @@ class IgnoreDialog(QDialog):
 
         self.table.customContextMenuRequested.connect(self._menu)
 
-        self.table.itemDoubleClicked.connect(lambda _=None: self._open_profile_selected())
-
-
+        self.table.itemDoubleClicked.connect(
+            lambda _=None: self._open_profile_selected()
+        )
 
         hdr = self.table.horizontalHeader()
 
         from PyQt6.QtWidgets import QHeaderView
 
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)            # Name
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # Name
 
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)   # ID
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # ID
 
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)   # Level
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Level
 
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)            # Last Seen
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Last Seen
 
         root.addWidget(self.table, 1)
-
-
 
         # -- Footer buttons
 
@@ -1172,21 +1087,23 @@ class IgnoreDialog(QDialog):
 
         btn_row.setContentsMargins(0, 0, 0, 0)
 
+        self.btn_open = self._btn(
+            "Open Profile", "profile", self._open_profile_selected
+        )
 
+        self.btn_un = self._btn(
+            "Unignore Selected", "unblock", self._unignore_selected, kind="primary"
+        )
 
-        self.btn_open = self._btn("Open Profile", "profile", self._open_profile_selected)
-
-        self.btn_un = self._btn("Unignore Selected", "unblock", self._unignore_selected, kind="primary")
-
-        self.btn_un_all = self._btn("Unignore All", "unblock", self._unignore_all, kind="warning")
+        self.btn_un_all = self._btn(
+            "Unignore All", "unblock", self._unignore_all, kind="warning"
+        )
 
         self.btn_import = self._btn("Import...", "import", self._import)
 
         self.btn_export = self._btn("Export...", "export", self._export)
 
-        self.btn_close  = self._btn("Close", None, self.accept)
-
-
+        self.btn_close = self._btn("Close", None, self.accept)
 
         btn_row.addWidget(self.btn_open)
 
@@ -1206,15 +1123,11 @@ class IgnoreDialog(QDialog):
 
         root.addLayout(btn_row)
 
-
-
         # data
 
         self._reload_table()
 
         self._update_count()
-
-
 
         # keyboard conveniences
 
@@ -1222,13 +1135,11 @@ class IgnoreDialog(QDialog):
 
         self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-
-
     # ------------------------- helpers & style -------------------------
 
-
-
-    def _btn(self, text: str, ic_name: Optional[str], slot, kind: str = "neutral") -> QPushButton:
+    def _btn(
+        self, text: str, ic_name: Optional[str], slot, kind: str = "neutral"
+    ) -> QPushButton:
 
         b = QPushButton(text)
 
@@ -1248,8 +1159,6 @@ class IgnoreDialog(QDialog):
 
         return b
 
-
-
     def _apply_styles(self):
 
         """
@@ -1266,7 +1175,8 @@ class IgnoreDialog(QDialog):
 
         """
 
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
 
         /* ---------- Base ---------- */
 
@@ -1594,21 +1504,17 @@ class IgnoreDialog(QDialog):
 
         }
 
-        """)
-
-
-
-
+        """
+        )
 
     # ------------------------- data & filtering -------------------------
 
-
-
     def _rows_source(self) -> List[TargetInfo]:
 
-        return [self.info_map.get(uid, TargetInfo(user_id=uid)) for uid in sorted(self.ignored)]
-
-
+        return [
+            self.info_map.get(uid, TargetInfo(user_id=uid))
+            for uid in sorted(self.ignored)
+        ]
 
     def _reload_table(self):
 
@@ -1616,15 +1522,11 @@ class IgnoreDialog(QDialog):
 
         self.table.setRowCount(0)
 
-
-
         for inf in self._rows_source():
 
             r = self.table.rowCount()
 
             self.table.insertRow(r)
-
-
 
             name = inf.name or "-"
             last_raw = inf.last_action_relative or inf.last_action_status or ""
@@ -1636,15 +1538,14 @@ class IgnoreDialog(QDialog):
             it_level = QTableWidgetItem(lvl)
             it_last = QTableWidgetItem(last)
 
-
-
             # For numeric sort
 
             it_id.setData(Qt.ItemDataRole.UserRole, int(inf.user_id))
 
-            it_level.setData(Qt.ItemDataRole.UserRole, int(inf.level) if inf.level is not None else -1)
-
-
+            it_level.setData(
+                Qt.ItemDataRole.UserRole,
+                int(inf.level) if inf.level is not None else -1,
+            )
 
             # Visual tweaks
 
@@ -1654,13 +1555,9 @@ class IgnoreDialog(QDialog):
 
             it_name.setFont(f)
 
-
-
             it_id.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             it_level.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-
 
             palette = last_action_palette(last_raw)
 
@@ -1684,10 +1581,6 @@ class IgnoreDialog(QDialog):
 
             it_last.setToolTip(tooltip)
 
-
-
-
-
             self.table.setItem(r, 0, it_name)
 
             self.table.setItem(r, 1, it_id)
@@ -1695,8 +1588,6 @@ class IgnoreDialog(QDialog):
             self.table.setItem(r, 2, it_level)
 
             self.table.setItem(r, 3, it_last)
-
-
 
         # denser rows
 
@@ -1706,15 +1597,11 @@ class IgnoreDialog(QDialog):
 
         self._filter_table(self.search.text())
 
-
-
     def _safe_cell_lower(self, row: int, col: int) -> str:
 
         it = self.table.item(row, col)
 
         return ((it.text() if it else "") or "").lower()
-
-
 
     def _filter_table(self, text: str):
 
@@ -1730,8 +1617,6 @@ class IgnoreDialog(QDialog):
 
         self._update_count()
 
-
-
     def _selected_ids(self) -> List[int]:
 
         ids: List[int] = []
@@ -1746,11 +1631,7 @@ class IgnoreDialog(QDialog):
 
         return ids
 
-
-
     # ------------------------- actions -------------------------
-
-
 
     def _open_profile_selected(self):
 
@@ -1762,8 +1643,6 @@ class IgnoreDialog(QDialog):
 
         QDesktopServices.openUrl(QUrl.fromUserInput(profile_url(ids[0])))
 
-
-
     def _unignore_selected(self):
 
         for uid in self._selected_ids():
@@ -1774,8 +1653,6 @@ class IgnoreDialog(QDialog):
 
         self._update_count()
 
-
-
     def _unignore_all(self):
 
         self.ignored.clear()
@@ -1784,11 +1661,11 @@ class IgnoreDialog(QDialog):
 
         self._update_count()
 
-
-
     def _export(self):
 
-        path, _ = QFileDialog.getSaveFileName(self, "Export ignored", "ignored.txt", "Text (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export ignored", "ignored.txt", "Text (*.txt)"
+        )
 
         if not path:
 
@@ -1806,11 +1683,11 @@ class IgnoreDialog(QDialog):
 
             pass
 
-
-
     def _import(self):
 
-        path, _ = QFileDialog.getOpenFileName(self, "Import ignored", "", "Text (*.txt);;All Files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import ignored", "", "Text (*.txt);;All Files (*)"
+        )
 
         if not path:
 
@@ -1842,8 +1719,6 @@ class IgnoreDialog(QDialog):
 
             pass
 
-
-
     def _update_count(self):
 
         n = len(self.ignored)
@@ -1864,21 +1739,13 @@ class IgnoreDialog(QDialog):
 
         self.lbl_count.update()
 
-
-
-
-
     # ------------------------- context menu -------------------------
-
-
 
     def _menu(self, pos):
 
         idx = self.table.indexAt(pos)
 
         menu = QMenu(self)
-
-
 
         if idx.isValid():
 
@@ -1889,8 +1756,6 @@ class IgnoreDialog(QDialog):
                 self.table.clearSelection()
 
                 self.table.selectRow(idx.row())
-
-
 
             r_user = self.table.item(idx.row(), 1)
 
@@ -1908,9 +1773,9 @@ class IgnoreDialog(QDialog):
 
                 act_copy = QAction(icon("copy"), "Copy ID", self)
 
-                act_copy.triggered.connect(lambda: QApplication.clipboard().setText(str(user_id)))
-
-
+                act_copy.triggered.connect(
+                    lambda: QApplication.clipboard().setText(str(user_id))
+                )
 
                 menu.addAction(act_open)
 
@@ -1922,20 +1787,18 @@ class IgnoreDialog(QDialog):
 
                 menu.addSeparator()
 
+        menu.addAction(
+            QAction(icon("import"), "Import...", self, triggered=self._import)
+        )
 
-
-        menu.addAction(QAction(icon("import"), "Import...", self, triggered=self._import))
-
-        menu.addAction(QAction(icon("export"), "Export...", self, triggered=self._export))
+        menu.addAction(
+            QAction(icon("export"), "Export...", self, triggered=self._export)
+        )
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
 
-
-
-
 class IgnoredPromptDialog(QDialog):
-
     def __init__(self, name: str, parent=None, open_what: str = "profile"):
 
         super().__init__(parent)
@@ -1943,8 +1806,6 @@ class IgnoredPromptDialog(QDialog):
         self.setWindowTitle("Ignored Target")
 
         lay = QVBoxLayout(self)
-
-
 
         if open_what == "attack":
 
@@ -1954,14 +1815,9 @@ class IgnoredPromptDialog(QDialog):
 
             action_text = "open the profile"
 
-
-
         lbl = QLabel(
-
             f"<b>{name}</b> is currently <span style='color:#ff8080'>ignored</span>.<br/>"
-
             f"Do you want to unignore and {action_text}?"
-
         )
 
         lay.addWidget(lbl)
@@ -1986,12 +1842,15 @@ class IgnoredPromptDialog(QDialog):
 
         self.result_choice = "cancel"
 
-        self.btn_unignore_open.clicked.connect(lambda: (setattr(self, "result_choice", "unignore_open"), self.accept()))
+        self.btn_unignore_open.clicked.connect(
+            lambda: (setattr(self, "result_choice", "unignore_open"), self.accept())
+        )
 
-        self.btn_open_once.clicked.connect(lambda: (setattr(self, "result_choice", "open_once"), self.accept()))
+        self.btn_open_once.clicked.connect(
+            lambda: (setattr(self, "result_choice", "open_once"), self.accept())
+        )
 
         self.btn_cancel.clicked.connect(self.reject)
-
 
 
 # ======================================================================
@@ -1999,7 +1858,6 @@ class IgnoredPromptDialog(QDialog):
 #                            ABOUT DIALOG
 
 # ======================================================================
-
 
 
 class AboutDialog(QDialog):
@@ -2014,31 +1872,25 @@ class AboutDialog(QDialog):
 
     """
 
+    updateFound = pyqtSignal(
+        str
+    )  # emitted from worker thread â- ' handled in UI thread
 
-
-    updateFound = pyqtSignal(str)  # emitted from worker thread â- ' handled in UI thread
-
-
-
-    GITHUB_RAW = "https://raw.githubusercontent.com/skillerious/TornTargetTracker/main/assets/version.json"
-
-    GITHUB_API = "https://api.github.com/repos/skillerious/TornTargetTracker/contents/assets/version.json"
-
-    GITHUB_RAW_FALLBACK = "https://github.com/skillerious/TornTargetTracker/raw/main/assets/version.json"
-
-    GITHUB_BLOB_PAGE = "https://github.com/skillerious/TornTargetTracker/blob/main/assets/version.json"
+    VERSION_ENDPOINTS = [
+        f"{VERSION_TRACKER_BASE}?format=json&app=target-tracker&latest=1",
+        f"{VERSION_TRACKER_BASE}?format=json&app=target-tracker",
+        f"{VERSION_TRACKER_BASE}?format=json",
+        f"{VERSION_TRACKER_BASE}?format=code&app=target-tracker",
+    ]
 
     RELEASES_URL = "https://github.com/skillerious/TornTargetTracker/releases"
 
-
-
-    # Optional: env var (or hardcode if you insist). Keep read-only!
-
-    GITHUB_TOKEN = os.environ.get("TTT_GITHUB_TOKEN", "").strip()
-
-
-
-    def __init__(self, parent=None, app_name: str = "Target Tracker", app_version: Optional[str] = None):
+    def __init__(
+        self,
+        parent=None,
+        app_name: str = "Target Tracker",
+        app_version: Optional[str] = None,
+    ):
 
         super().__init__(parent)
 
@@ -2048,8 +1900,6 @@ class AboutDialog(QDialog):
 
         self.setMinimumWidth(580)
 
-
-
         # ---------- logging ----------
 
         self._log = logging.getLogger("TargetTracker.About")
@@ -2058,19 +1908,17 @@ class AboutDialog(QDialog):
 
             h = logging.StreamHandler()
 
-            h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+            h.setFormatter(
+                logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+            )
 
             self._log.addHandler(h)
 
             self._log.setLevel(logging.INFO)
 
-
-
         # ---------- runtime info ----------
 
         from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR
-
-
 
         self.app_name = app_name
 
@@ -2079,8 +1927,6 @@ class AboutDialog(QDialog):
         self.pyqt_ver = PYQT_VERSION_STR
 
         self.qt_ver = QT_VERSION_STR
-
-
 
         # ---------- helpers ----------
 
@@ -2104,20 +1950,14 @@ class AboutDialog(QDialog):
 
                 return None
 
-
-
         def _detect_local_version() -> str:
 
             here = os.path.abspath(os.path.dirname(__file__))
 
             for p in (
-
                 os.path.join(here, "assets", "version.json"),
-
                 os.path.join(here, "version.json"),
-
                 os.path.join(get_appdata_dir(), "version.json"),
-
             ):
 
                 v = _json_version_from(p)
@@ -2147,8 +1987,6 @@ class AboutDialog(QDialog):
                 pass
 
             return app_version or "-"
-
-
 
         def _parse_version(s: str) -> tuple:
 
@@ -2184,29 +2022,32 @@ class AboutDialog(QDialog):
 
             return tuple(nums)
 
-
-
         def _is_newer(remote: str, local: str) -> bool:
 
             r, l = _parse_version(remote), _parse_version(local)
 
             newer = r > l
 
-            self._log.info("Compare versions: remote=%s parsed=%s  local=%s parsed=%s  -> newer=%s",
-
-                           remote, r, local, l, newer)
+            self._log.info(
+                "Compare versions: remote=%s parsed=%s  local=%s parsed=%s  -> newer=%s",
+                remote,
+                r,
+                local,
+                l,
+                newer,
+            )
 
             return newer
 
-
-
         self.local_version = _detect_local_version()
 
-        self._log.info("About opened: local_version=%s Python=%s PyQt=%s Qt=%s",
-
-                       self.local_version, self.py_ver, self.pyqt_ver, self.qt_ver)
-
-
+        self._log.info(
+            "About opened: local_version=%s Python=%s PyQt=%s Qt=%s",
+            self.local_version,
+            self.py_ver,
+            self.pyqt_ver,
+            self.qt_ver,
+        )
 
         # ---------- header (transparent) ----------
 
@@ -2214,7 +2055,8 @@ class AboutDialog(QDialog):
 
         self.header.setObjectName("aboutHeader")
 
-        self.header.setStyleSheet("""
+        self.header.setStyleSheet(
+            """
 
             #aboutHeader { background: transparent; }
 
@@ -2250,15 +2092,14 @@ class AboutDialog(QDialog):
 
             QLabel#pillText { color:#d7ffe3; font-size:12px; background: transparent; }
 
-        """)
+        """
+        )
 
         h = QHBoxLayout(self.header)
 
         h.setContentsMargins(0, 0, 0, 0)
 
         h.setSpacing(12)
-
-
 
         # crisp logo: prefer ICO, then PNG
 
@@ -2288,15 +2129,16 @@ class AboutDialog(QDialog):
 
             logo_used = png_path
 
-
-
         logo_label = QLabel()
 
         if not pm_logo.isNull():
 
-            pm_logo = pm_logo.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
-
-                                     Qt.TransformationMode.SmoothTransformation)
+            pm_logo = pm_logo.scaled(
+                56,
+                56,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
 
             logo_label.setPixmap(pm_logo)
 
@@ -2304,23 +2146,24 @@ class AboutDialog(QDialog):
 
         self._log.info("About logo: using %s", logo_used or "none")
 
-
-
         # title
 
-        title_box = QVBoxLayout(); title_box.setSpacing(2)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
 
-        self.lbl_title = QLabel(f"<span style='font-size:20px; font-weight:600;'>{app_name}</span>")
+        self.lbl_title = QLabel(
+            f"<span style='font-size:20px; font-weight:600;'>{app_name}</span>"
+        )
 
         self.lbl_sub = QLabel("A Torn.com target list viewer")
 
         self.lbl_sub.setStyleSheet("color:#b8c0cc;")
 
-        title_box.addWidget(self.lbl_title); title_box.addWidget(self.lbl_sub)
+        title_box.addWidget(self.lbl_title)
+        title_box.addWidget(self.lbl_sub)
 
-        h.addLayout(title_box, 1); h.addStretch(1)
-
-
+        h.addLayout(title_box, 1)
+        h.addStretch(1)
 
         # Version pill (match height/padding of update pill)
 
@@ -2332,7 +2175,7 @@ class AboutDialog(QDialog):
 
         vp_l = QHBoxLayout(self.version_pill)
 
-        vp_l.setContentsMargins(10, 3, 10, 3)   # same padding as update pill
+        vp_l.setContentsMargins(10, 3, 10, 3)  # same padding as update pill
 
         vp_l.setSpacing(6)
 
@@ -2344,25 +2187,26 @@ class AboutDialog(QDialog):
 
         h.addWidget(self.version_pill, 0, Qt.AlignmentFlag.AlignTop)
 
-
-
         # green pill (transparent interior) for updates
 
         def _green_dot_pm(sz=14):
 
-            pm = QPixmap(sz, sz); pm.fill(Qt.GlobalColor.transparent)
+            pm = QPixmap(sz, sz)
+            pm.fill(Qt.GlobalColor.transparent)
 
-            p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
             color = QColor(72, 187, 120)
 
-            p.setBrush(QBrush(color)); p.setPen(QPen(color, 1))
+            p.setBrush(QBrush(color))
+            p.setPen(QPen(color, 1))
 
-            r = sz - 2; p.drawEllipse(1, 1, r, r); p.end()
+            r = sz - 2
+            p.drawEllipse(1, 1, r, r)
+            p.end()
 
             return pm
-
-
 
         self.update_pill = QWidget()
 
@@ -2370,7 +2214,9 @@ class AboutDialog(QDialog):
 
         self.update_pill.setAutoFillBackground(False)
 
-        self.update_pill.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.update_pill.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
 
         pill_l = QHBoxLayout(self.update_pill)
 
@@ -2378,9 +2224,8 @@ class AboutDialog(QDialog):
 
         pill_l.setSpacing(6)
 
-
-
-        pill_icon = QLabel(); pill_icon.setPixmap(_green_dot_pm(14))
+        pill_icon = QLabel()
+        pill_icon.setPixmap(_green_dot_pm(14))
 
         self._pill_text = QLabel("Update available")
 
@@ -2388,15 +2233,12 @@ class AboutDialog(QDialog):
 
         self._pill_text.setWordWrap(False)
 
-
-
-        pill_l.addWidget(pill_icon); pill_l.addWidget(self._pill_text)
+        pill_l.addWidget(pill_icon)
+        pill_l.addWidget(self._pill_text)
 
         self.update_pill.setVisible(False)
 
         h.addWidget(self.update_pill, 0, Qt.AlignmentFlag.AlignTop)
-
-
 
         # ---------- body ----------
 
@@ -2406,7 +2248,8 @@ class AboutDialog(QDialog):
 
         info.setStyleSheet("QTextBrowser { border: none; }")
 
-        info.setHtml(f"""
+        info.setHtml(
+            f"""
 
             <style>
 
@@ -2462,13 +2305,12 @@ class AboutDialog(QDialog):
 
             </p>
 
-        """)
+        """
+        )
 
-
-
-        sep = QFrame(self); sep.setFrameShape(QFrame.Shape.HLine); sep.setFrameShadow(QFrame.Shadow.Sunken)
-
-
+        sep = QFrame(self)
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
 
         # ---------- footer ----------
 
@@ -2476,27 +2318,25 @@ class AboutDialog(QDialog):
 
             b = QPushButton(text)
 
-            if icon_name: b.setIcon(icon(icon_name))
+            if icon_name:
+                b.setIcon(icon(icon_name))
 
-            if url: b.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+            if url:
+                b.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
 
             return b
 
-
-
         btn_github = _btn("GitHub", "github", "https://github.com/skillerious")
 
-        btn_torn   = _btn("Torn Profile", "link", "https://www.torn.com/profiles.php?XID=3212954")
-
-
+        btn_torn = _btn(
+            "Torn Profile", "link", "https://www.torn.com/profiles.php?XID=3212954"
+        )
 
         # Renamed to "Update" (was "Release Notes")
 
         self.btn_release = _btn("Update", "update", self.RELEASES_URL)
 
         self.btn_release.setVisible(False)
-
-
 
         copy_btn = QPushButton("Copy Diagnostics")
 
@@ -2505,9 +2345,7 @@ class AboutDialog(QDialog):
             try:
 
                 QApplication.clipboard().setText(
-
                     f"{app_name} {self.local_version}  |  Python {self.py_ver}  •  PyQt {self.pyqt_ver}  •  Qt {self.qt_ver}"
-
                 )
 
             except Exception:
@@ -2516,181 +2354,160 @@ class AboutDialog(QDialog):
 
         copy_btn.clicked.connect(_copy_diag)
 
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
 
-
-        close_btn = QPushButton("Close"); close_btn.clicked.connect(self.accept)
-
-
-
-        btns = QHBoxLayout(); btns.setContentsMargins(0, 0, 0, 0); btns.setSpacing(8)
+        btns = QHBoxLayout()
+        btns.setContentsMargins(0, 0, 0, 0)
+        btns.setSpacing(8)
 
         btns.addStretch(1)
 
-        for b in (btn_github, btn_torn, self.btn_release, copy_btn, close_btn): btns.addWidget(b)
-
-
+        for b in (btn_github, btn_torn, self.btn_release, copy_btn, close_btn):
+            btns.addWidget(b)
 
         # ---------- root layout ----------
 
         root = QVBoxLayout(self)
 
-        root.setContentsMargins(14, 14, 14, 14); root.setSpacing(12)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(12)
 
-        root.addWidget(self.header); root.addWidget(info); root.addWidget(sep); root.addLayout(btns)
-
-
+        root.addWidget(self.header)
+        root.addWidget(info)
+        root.addWidget(sep)
+        root.addLayout(btns)
 
         # Connect the queued signal for reliable UI updates
 
         self.updateFound.connect(self._apply_update_visuals)
 
-
-
         # start async update check
 
         QTimer.singleShot(0, lambda: self._check_for_update(_is_newer))
-
-
 
     # ---------- update logic ----------
 
     def _check_for_update(self, is_newer_fn):
 
-        import threading, base64, re, time
+        import threading, re
 
         import requests
 
-
-
         headers = {
-
             "User-Agent": f"{self.app_name}-AboutDialog",
-
-            "Accept": "application/vnd.github+json",
-
+            "Accept": "application/json",
         }
 
-        if self.GITHUB_TOKEN:
+        def _extract_version_candidate(data) -> Optional[str]:
+            """
+            Attempt to pull the best version string out of arbitrary JSON / text.
+            Priority:
+              1. Tracks for our app id
+              2. Dict/list entries containing version keys
+              3. Regex scan constrained to our app id
+              4. Any semantic version pattern
+            """
 
-            headers["Authorization"] = f"Bearer {self.GITHUB_TOKEN}"
+            def _from_tracks(tracks) -> Optional[str]:
+                if isinstance(tracks, dict):
+                    for track in tracks.values():
+                        if isinstance(track, dict):
+                            ver = track.get("version")
+                            if ver:
+                                return str(ver).strip()
+                return None
 
-            self._log.info("GitHub token enabled (len=%d)", len(self.GITHUB_TOKEN))
+            if isinstance(data, dict):
+                # Direct app entry?
+                if data.get("id") == VERSION_APP_ID:
+                    ver = _from_tracks(data.get("tracks"))
+                    if ver:
+                        return ver
+                    by_code = data.get("code")
+                    if by_code:
+                        return str(by_code)
 
+                # Nested list of apps?
+                for key in ("apps", "data", "items"):
+                    if key in data and isinstance(data[key], (list, tuple)):
+                        candidate = _extract_version_candidate(data[key])
+                        if candidate:
+                            return candidate
 
+                # Generic scan of values
+                for value in data.values():
+                    candidate = _extract_version_candidate(value)
+                    if candidate:
+                        return candidate
 
-        def _fetch_remote_version() -> Optional[str]:
+            if isinstance(data, (list, tuple, set)):
+                for item in data:
+                    candidate = _extract_version_candidate(item)
+                    if candidate:
+                        return candidate
 
-            # 1) RAW (cache-busted)
+            if isinstance(data, str):
+                text = data
+                pattern_app = (
+                    rf"\"id\"\s*:\s*\"{re.escape(VERSION_APP_ID)}\".*?"
+                    r"\"version\"\s*:\s*\"([0-9][^\"]+)\""
+                )
+                m = re.search(pattern_app, text, re.IGNORECASE | re.DOTALL)
+                if m:
+                    return m.group(1).strip()
 
-            try:
+                pattern_inline = (
+                    rf"{re.escape(VERSION_APP_ID)}[^\d]{{0,30}}([0-9]+(?:\.[0-9]+)+)"
+                )
+                m = re.search(pattern_inline, text, re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
 
-                url = f"{self.GITHUB_RAW}?_ts={int(time.time())}"
-
-                self._log.info("Fetch RAW: %s", url)
-
-                r = requests.get(url, headers=headers, timeout=5)
-
-                self._log.info("RAW status=%s len=%s", r.status_code, len(r.text or ""))
-
-                if r.ok and r.text:
-
-                    obj = r.json()
-
-                    v = obj.get("version")
-
-                    if v: return str(v).strip()
-
-            except Exception as e:
-
-                self._log.info("RAW fetch err: %s", e)
-
-
-
-            # 2) Contents API
-
-            try:
-
-                self._log.info("Fetch API: %s", self.GITHUB_API)
-
-                r = requests.get(self.GITHUB_API, headers=headers, timeout=6)
-
-                self._log.info("API status=%s", r.status_code)
-
-                if r.ok:
-
-                    data = r.json()
-
-                    if isinstance(data, dict) and "content" in data:
-
-                        raw = base64.b64decode(data["content"]).decode("utf-8", errors="ignore")
-
-                        obj = json.loads(raw)
-
-                        v = obj.get("version")
-
-                        if v: return str(v).strip()
-
-            except Exception as e:
-
-                self._log.info("API fetch err: %s", e)
-
-
-
-            # 3) RAW fallback
-
-            try:
-
-                self._log.info("Fetch RAW Fallback: %s", self.GITHUB_RAW_FALLBACK)
-
-                r = requests.get(self.GITHUB_RAW_FALLBACK, headers=headers, timeout=6, allow_redirects=True)
-
-                self._log.info("RAW Fallback status=%s", r.status_code)
-
-                if r.ok and r.text:
-
-                    obj = r.json()
-
-                    v = obj.get("version")
-
-                    if v: return str(v).strip()
-
-            except Exception as e:
-
-                self._log.info("RAW fallback err: %s", e)
-
-
-
-            # 4) Parse blob page
-
-            try:
-
-                self._log.info("Fetch BLOB page: %s", self.GITHUB_BLOB_PAGE)
-
-                r = requests.get(self.GITHUB_BLOB_PAGE, headers=headers, timeout=7)
-
-                self._log.info("BLOB status=%s len=%s", r.status_code, len(r.text or ""))
-
-                if r.ok and r.text:
-
-                    m = re.search(r'\"version\"\s*:\s*\"([0-9][^\"]+)\"', r.text)
-
-                    if m: return m.group(1).strip()
-
-            except Exception as e:
-
-                self._log.info("BLOB parse err: %s", e)
-
-
+                m = re.search(r"\d+(?:\.\d+)+", text)
+                if m:
+                    return m.group(0)
 
             return None
 
+        def _fetch_remote_version() -> Optional[str]:
 
+            for url in self.VERSION_ENDPOINTS:
+                try:
+                    self._log.info("Fetch version info: %s", url)
+                    r = requests.get(url, headers=headers, timeout=6)
+                    text = r.text or ""
+                    self._log.info("Status=%s len=%s", r.status_code, len(text))
+                    if not r.ok:
+                        continue
+                    candidate = None
+                    if "format=code" in url:
+                        candidate = _extract_version_candidate(text.strip())
+                    else:
+                        try:
+                            data = r.json()
+                        except Exception as exc:
+                            self._log.info("JSON parse err (%s): %s", url, exc)
+                            candidate = _extract_version_candidate(text)
+                        else:
+                            candidate = _extract_version_candidate(data)
+                            if not candidate:
+                                candidate = _extract_version_candidate(text)
+                    if candidate:
+                        self._log.info("Remote version candidate: %s", candidate)
+                        return candidate.strip()
+                except Exception as e:
+                    self._log.info("Version fetch err (%s): %s", url, e)
+
+            return None
 
         def _worker():
 
             remote = _fetch_remote_version()
 
-            self._log.info("Remote version fetched: %r (local=%r)", remote, self.local_version)
+            self._log.info(
+                "Remote version fetched: %r (local=%r)", remote, self.local_version
+            )
 
             if not remote:
 
@@ -2712,11 +2529,7 @@ class AboutDialog(QDialog):
 
                 self._log.info("Version compare failed: %s", e)
 
-
-
         threading.Thread(target=_worker, daemon=True).start()
-
-
 
     def _apply_update_visuals(self, remote_version: str):
 
@@ -2727,8 +2540,6 @@ class AboutDialog(QDialog):
             text = f"Update {remote_version} available"
 
             self._pill_text.setText(text)
-
-
 
             # ensure text never clips
 
@@ -2742,11 +2553,7 @@ class AboutDialog(QDialog):
 
             self.update_pill.setVisible(True)
 
-
-
             self.btn_release.setVisible(True)
-
-
 
             # refresh layout immediately
 
@@ -2758,18 +2565,11 @@ class AboutDialog(QDialog):
 
             self.repaint()
 
-
-
             self._log.info("Update UI applied (pill shown, min_w=%d).", min_w)
 
         except Exception as e:
 
             self._log.info("Apply update visuals failed: %s", e)
-
-
-
-
-
 
 
 # ======================================================================
@@ -2779,9 +2579,7 @@ class AboutDialog(QDialog):
 # ======================================================================
 
 
-
 class StyledToolBar(QToolBar):
-
     def __init__(self):
 
         super().__init__()
@@ -2792,7 +2590,8 @@ class StyledToolBar(QToolBar):
 
         self.setIconSize(QSize(20, 20))
 
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
 
             QToolBar { background: transparent; border: 0; padding: 2px; spacing: 6px; }
 
@@ -2804,8 +2603,8 @@ class StyledToolBar(QToolBar):
 
             QToolBar::separator { background: rgba(255,255,255,0.10); width: 1px; margin: 6px 4px; }
 
-        """)
-
+        """
+        )
 
 
 class MainView(QWidget):
@@ -2813,6 +2612,7 @@ class MainView(QWidget):
     request_refresh = pyqtSignal()
 
     request_export = pyqtSignal()
+    request_export_json = pyqtSignal()
 
     request_open_settings = pyqtSignal()
 
@@ -2826,13 +2626,9 @@ class MainView(QWidget):
 
     request_remove_targets = pyqtSignal(list)
 
-
-
     ignore_ids = pyqtSignal(list)
 
     unignore_ids = pyqtSignal(list)
-
-
 
     def __init__(self):
 
@@ -2840,15 +2636,14 @@ class MainView(QWidget):
 
         self.model = TargetsModel()
 
-        self.proxy = FilterProxy(); self.proxy.setSourceModel(self.model)
+        self.proxy = FilterProxy()
+        self.proxy.setSourceModel(self.model)
 
         self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
 
         self._ignored_ids: Set[int] = set()
 
         self._did_size_cols = False  # avoid resizing columns on each refresh
-
-
 
         # fetching + coalesced sort
 
@@ -2862,47 +2657,52 @@ class MainView(QWidget):
 
         self._resort_timer.timeout.connect(self._flush_resort)
 
-
-
         # improved search bar
 
         self.search_bar = SearchBar()
 
         self.search_bar.queryChanged.connect(self.proxy.set_search_query)
 
+        self.chk_ok = QCheckBox("Okay")
+        self.chk_ok.setChecked(True)
 
+        self.chk_hosp = QCheckBox("Hospital")
+        self.chk_hosp.setChecked(True)
 
-        self.chk_ok = QCheckBox("Okay"); self.chk_ok.setChecked(True)
+        self.chk_jail = QCheckBox("Jail")
+        self.chk_jail.setChecked(True)
 
-        self.chk_hosp = QCheckBox("Hospital"); self.chk_hosp.setChecked(True)
+        self.chk_fed = QCheckBox("Federal")
+        self.chk_fed.setChecked(True)
 
-        self.chk_jail = QCheckBox("Jail"); self.chk_jail.setChecked(True)
+        self.chk_trav = QCheckBox("Traveling")
+        self.chk_trav.setChecked(True)
 
-        self.chk_fed = QCheckBox("Federal"); self.chk_fed.setChecked(True)
+        self.chk_hide_ignored = QCheckBox("Hide Ignored")
+        self.chk_hide_ignored.setChecked(False)
 
-        self.chk_trav = QCheckBox("Traveling"); self.chk_trav.setChecked(True)
-
-        self.chk_hide_ignored = QCheckBox("Hide Ignored"); self.chk_hide_ignored.setChecked(False)
-
-
-
-        for chk in (self.chk_ok, self.chk_hosp, self.chk_jail, self.chk_fed, self.chk_trav, self.chk_hide_ignored):
+        for chk in (
+            self.chk_ok,
+            self.chk_hosp,
+            self.chk_jail,
+            self.chk_fed,
+            self.chk_trav,
+            self.chk_hide_ignored,
+        ):
 
             chk.stateChanged.connect(self._on_filter_flags)
 
+        self.sb_lvl_min = QSpinBox()
+        self.sb_lvl_min.setRange(0, 100)
+        self.sb_lvl_min.setValue(0)
 
-
-        self.sb_lvl_min = QSpinBox(); self.sb_lvl_min.setRange(0, 100); self.sb_lvl_min.setValue(0)
-
-        self.sb_lvl_max = QSpinBox(); self.sb_lvl_max.setRange(0, 100); self.sb_lvl_max.setValue(100)
+        self.sb_lvl_max = QSpinBox()
+        self.sb_lvl_max.setRange(0, 100)
+        self.sb_lvl_max.setValue(100)
 
         self.sb_lvl_min.valueChanged.connect(self._on_level_bounds)
 
         self.sb_lvl_max.valueChanged.connect(self._on_level_bounds)
-
-
-
-
 
         self.table = QTableView()
 
@@ -2926,27 +2726,19 @@ class MainView(QWidget):
 
         self.table.verticalHeader().setVisible(False)
 
-
-
         # smoother UX when columns resized: stretch last column
 
         self.table.horizontalHeader().setStretchLastSection(True)
 
         self.table.horizontalHeader().setSectionsClickable(True)
 
-
-
         # DOUBLE-CLICK => OPEN ATTACK WINDOW
 
         self.table.doubleClicked.connect(self._open_attack)
 
-
-
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self.table.customContextMenuRequested.connect(self._menu)
-
-
 
         # actions
 
@@ -2954,9 +2746,14 @@ class MainView(QWidget):
 
         _unblock_ic = icon("unblock")
 
-        self.act_unignore = QAction(_unblock_ic if not _unblock_ic.isNull() else icon("block"), "Unignore Selected", self)
+        self.act_unignore = QAction(
+            _unblock_ic if not _unblock_ic.isNull() else icon("block"),
+            "Unignore Selected",
+            self,
+        )
 
-        self.act_remove = QAction(icon("delete"), "Remove Selected", self); self.act_remove.setShortcut("Del")
+        self.act_remove = QAction(icon("delete"), "Remove Selected", self)
+        self.act_remove.setShortcut("Del")
 
         self.act_ignore.triggered.connect(self._emit_ignore_selected)
 
@@ -2964,55 +2761,75 @@ class MainView(QWidget):
 
         self.act_remove.triggered.connect(self._emit_remove_selected)
 
-
-
         # toolbar
 
-        tb = StyledToolBar()
+        self.toolbar = StyledToolBar()
+        self._toolbar_visible = True
 
-        act_refresh = tb.addAction(icon("refresh"), "Refresh"); act_refresh.setShortcut("Ctrl+R")
+        act_refresh = self.toolbar.addAction(icon("refresh"), "Refresh")
+        act_refresh.setShortcut("Ctrl+R")
 
         act_refresh.triggered.connect(self.request_refresh.emit)
 
-        act_export = tb.addAction(icon("export"), "Export CSV"); act_export.setShortcut("Ctrl+E")
+        act_export_csv = self.toolbar.addAction(icon("csv"), "Export CSV")
+        act_export_csv.setShortcut("Ctrl+E")
 
-        act_export.triggered.connect(self.request_export.emit)
+        act_export_csv.triggered.connect(self.request_export.emit)
 
-        tb.addSeparator()
+        act_export_json = self.toolbar.addAction(icon("json"), "Export JSON")
+        act_export_json.setShortcut("Ctrl+Shift+E")
 
-        act_load = tb.addAction(icon("folder"), "Load Targets JSON"); act_load.setShortcut("Ctrl+O")
+        act_export_json.triggered.connect(self.request_export_json.emit)
+
+        self.toolbar.addSeparator()
+
+        act_load = self.toolbar.addAction(icon("folder"), "Load Targets JSON")
+        act_load.setShortcut("Ctrl+O")
 
         act_load.triggered.connect(self.request_load_targets.emit)
 
-        act_add = tb.addAction(icon("add"), "Add Targets..."); act_add.setShortcut("Ctrl+N")
+        act_add = self.toolbar.addAction(icon("add"), "Add Targets...")
+        act_add.setShortcut("Ctrl+N")
 
         act_add.triggered.connect(self._show_add_dialog)
 
-        act_del = tb.addAction(icon("delete"), "Remove Selected"); act_del.setShortcut("Del")
+        act_del = self.toolbar.addAction(icon("delete"), "Remove Selected")
+        act_del.setShortcut("Del")
 
         act_del.triggered.connect(self._emit_remove_selected)
 
-        tb.addSeparator()
+        self.toolbar.addSeparator()
 
-        act_ignore_mgr = tb.addAction(icon("block"), "Ignored..."); act_ignore_mgr.triggered.connect(self.request_manage_ignore.emit)
+        act_ignore_mgr = self.toolbar.addAction(icon("block"), "Ignored...")
+        act_ignore_mgr.triggered.connect(self.request_manage_ignore.emit)
 
-        tb.addSeparator()
+        self.toolbar.addSeparator()
 
-        act_settings = tb.addAction(icon("settings"), "Settings..."); act_settings.setShortcut("Ctrl+,")
+        act_settings = self.toolbar.addAction(icon("settings"), "Settings...")
+        act_settings.setShortcut("Ctrl+,")
 
         act_settings.triggered.connect(self.request_open_settings.emit)
 
-        act_about = tb.addAction(icon("info"), "About"); act_about.triggered.connect(self.request_show_about.emit)
-
-
+        act_about = self.toolbar.addAction(icon("info"), "About")
+        act_about.triggered.connect(self.request_show_about.emit)
 
         # filters row
 
-        frow = QWidget(); fh = QHBoxLayout(frow); fh.setContentsMargins(0,0,0,0)
+        self.filters_row = QWidget()
+        self._filters_visible = True
+        fh = QHBoxLayout(self.filters_row)
+        fh.setContentsMargins(0, 0, 0, 0)
 
         fh.addWidget(QLabel("Filters:"))
 
-        for w in (self.chk_ok, self.chk_hosp, self.chk_jail, self.chk_fed, self.chk_trav, self.chk_hide_ignored):
+        for w in (
+            self.chk_ok,
+            self.chk_hosp,
+            self.chk_jail,
+            self.chk_fed,
+            self.chk_trav,
+            self.chk_hide_ignored,
+        ):
 
             fh.addWidget(w)
 
@@ -3020,19 +2837,19 @@ class MainView(QWidget):
 
         fh.addWidget(QLabel("Level"))
 
-        fh.addWidget(self.sb_lvl_min); fh.addWidget(QLabel("to")); fh.addWidget(self.sb_lvl_max)
+        fh.addWidget(self.sb_lvl_min)
+        fh.addWidget(QLabel("to"))
+        fh.addWidget(self.sb_lvl_max)
 
         fh.addStretch(1)
 
         fh.addWidget(self.search_bar)
 
-
-
         lay = QVBoxLayout(self)
 
-        lay.addWidget(tb); lay.addWidget(frow); lay.addWidget(self.table)
-
-
+        lay.addWidget(self.toolbar)
+        lay.addWidget(self.filters_row)
+        lay.addWidget(self.table)
 
     # ---- fetching state + coalesced sorting ----
 
@@ -3060,15 +2877,11 @@ class MainView(QWidget):
 
             self.proxy.setDynamicSortFilter(True)
 
-
-
     def _schedule_resort(self):
 
         if not self._resort_timer.isActive():
 
             self._resort_timer.start()
-
-
 
     def _flush_resort(self):
 
@@ -3086,23 +2899,20 @@ class MainView(QWidget):
 
         prev_scroll = vbar.value()
 
-
-
         self.table.setUpdatesEnabled(False)
 
         self.proxy.invalidate()
 
-        self.proxy.sort(col if col >= 0 else 2, order if order is not None else Qt.SortOrder.DescendingOrder)
+        self.proxy.sort(
+            col if col >= 0 else 2,
+            order if order is not None else Qt.SortOrder.DescendingOrder,
+        )
 
         self.table.setUpdatesEnabled(True)
-
-
 
         self._restore_selection(prev_sel)
 
         vbar.setValue(prev_scroll)
-
-
 
     # ---- selection helpers to persist highlights while refreshing ----
 
@@ -3125,8 +2935,6 @@ class MainView(QWidget):
             ids.append(int(row.user_id))
 
         return ids
-
-
 
     def _restore_selection(self, ids: List[int]):
 
@@ -3166,13 +2974,15 @@ class MainView(QWidget):
 
                     first_idx = proxy_idx
 
-                sm.select(proxy_idx, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+                sm.select(
+                    proxy_idx,
+                    QItemSelectionModel.SelectionFlag.Select
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
 
         if first_idx is not None:
 
             self.table.setCurrentIndex(first_idx)
-
-
 
     # ---- batch-friendly API ----
 
@@ -3186,8 +2996,6 @@ class MainView(QWidget):
 
             self._schedule_resort()
 
-
-
     def set_rows(self, rows: List[TargetInfo]):
 
         prev_sel = self._selected_ids()
@@ -3196,11 +3004,7 @@ class MainView(QWidget):
 
         scroll_val = sb.value()
 
-
-
         self.model.set_rows(rows)
-
-
 
         if not getattr(self, "_did_size_cols", False):
 
@@ -3210,19 +3014,13 @@ class MainView(QWidget):
 
             self._did_size_cols = True
 
-
-
         self._restore_selection(prev_sel)
 
         sb.setValue(scroll_val)
 
-
-
         hdr = self.table.horizontalHeader()
 
         self.proxy.sort(hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
-
-
 
     def set_ignored(self, ids: Set[int]):
 
@@ -3232,27 +3030,16 @@ class MainView(QWidget):
 
         self.proxy.set_ignored(ids)
 
-
-
     def _on_filter_flags(self, _=None):
 
         self.proxy.set_flags(
-
             show_okay=self.chk_ok.isChecked(),
-
             show_hospital=self.chk_hosp.isChecked(),
-
             show_jail=self.chk_jail.isChecked(),
-
             show_federal=self.chk_fed.isChecked(),
-
             show_traveling=self.chk_trav.isChecked(),
-
             hide_ignored=self.chk_hide_ignored.isChecked(),
-
         )
-
-
 
     def _on_level_bounds(self, _=None):
 
@@ -3260,21 +3047,21 @@ class MainView(QWidget):
 
         hi = max(self.sb_lvl_min.value(), self.sb_lvl_max.value())
 
-        self.sb_lvl_min.blockSignals(True); self.sb_lvl_max.blockSignals(True)
+        self.sb_lvl_min.blockSignals(True)
+        self.sb_lvl_max.blockSignals(True)
 
-        self.sb_lvl_min.setValue(lo); self.sb_lvl_max.setValue(hi)
+        self.sb_lvl_min.setValue(lo)
+        self.sb_lvl_max.setValue(hi)
 
-        self.sb_lvl_min.blockSignals(False); self.sb_lvl_max.blockSignals(False)
+        self.sb_lvl_min.blockSignals(False)
+        self.sb_lvl_max.blockSignals(False)
 
         self.proxy.set_level_bounds(lo, hi)
 
-
-
     def _index_to_row(self, idx: QModelIndex) -> TargetInfo:
 
-        src = self.proxy.mapToSource(idx); return self.model.row(src.row())
-
-
+        src = self.proxy.mapToSource(idx)
+        return self.model.row(src.row())
 
     # ---- openers ----
 
@@ -3286,7 +3073,9 @@ class MainView(QWidget):
 
         if r.user_id in self._ignored_ids:
 
-            dlg = IgnoredPromptDialog(r.name or str(r.user_id), self, open_what="profile")
+            dlg = IgnoredPromptDialog(
+                r.name or str(r.user_id), self, open_what="profile"
+            )
 
             if dlg.exec():
 
@@ -3303,8 +3092,6 @@ class MainView(QWidget):
             return
 
         QDesktopServices.openUrl(url)
-
-
 
     def _open_attack(self, idx: QModelIndex):
 
@@ -3314,7 +3101,9 @@ class MainView(QWidget):
 
         if r.user_id in self._ignored_ids:
 
-            dlg = IgnoredPromptDialog(r.name or str(r.user_id), self, open_what="attack")
+            dlg = IgnoredPromptDialog(
+                r.name or str(r.user_id), self, open_what="attack"
+            )
 
             if dlg.exec():
 
@@ -3331,8 +3120,6 @@ class MainView(QWidget):
             return
 
         QDesktopServices.openUrl(url)
-
-
 
     # ---- context menu ----
 
@@ -3350,39 +3137,33 @@ class MainView(QWidget):
 
                 self.table.selectRow(idx.row())
 
-
-
         menu = QMenu(self)
 
         if idx.isValid():
 
             r = self._index_to_row(idx)
 
-
-
             act_open_profile = QAction(icon("profile"), "Open Profile", self)
 
             act_open_profile.triggered.connect(lambda: self._open_profile(idx))
-
-
 
             act_open_attack = QAction(icon("attack"), "Open attack window", self)
 
             act_open_attack.triggered.connect(lambda: self._open_attack(idx))
 
-
-
             act_copy_profile = QAction(icon("copy"), "Copy Profile URL", self)
 
-            act_copy_profile.triggered.connect(lambda: self._copy(profile_url(r.user_id)))
+            act_copy_profile.triggered.connect(
+                lambda: self._copy(profile_url(r.user_id))
+            )
 
+            act_copy_id = QAction(icon("id"), "Copy ID", self)
 
+            act_copy_id.triggered.connect(lambda: self._copy(str(r.user_id)))
 
             act_copy_attack = QAction(icon("copy"), "Copy Attack URL", self)
 
             act_copy_attack.triggered.connect(lambda: self._copy(attack_url(r.user_id)))
-
-
 
             menu.addAction(act_open_profile)
 
@@ -3392,11 +3173,11 @@ class MainView(QWidget):
 
             menu.addAction(act_copy_profile)
 
+            menu.addAction(act_copy_id)
+
             menu.addAction(act_copy_attack)
 
             menu.addSeparator()
-
-
 
         menu.addAction(self.act_ignore)
 
@@ -3406,11 +3187,7 @@ class MainView(QWidget):
 
         menu.addAction(self.act_remove)
 
-
-
         menu.exec(self.table.viewport().mapToGlobal(pos))
-
-
 
     def _copy(self, text: str):
 
@@ -3424,34 +3201,135 @@ class MainView(QWidget):
 
             pass
 
+    def _emit_ignore_selected(self) -> bool:
 
+        ids = self._selected_ids()
 
-    def _emit_ignore_selected(self):
+        if not ids:
 
-        self.ignore_ids.emit(self._selected_ids())
+            return False
 
+        self.ignore_ids.emit(ids)
 
+        return True
 
-    def _emit_unignore_selected(self):
+    def _emit_unignore_selected(self) -> bool:
 
-        self.unignore_ids.emit(self._selected_ids())
+        ids = self._selected_ids()
 
+        if not ids:
 
+            return False
 
-    def _emit_remove_selected(self):
+        self.unignore_ids.emit(ids)
 
-        self.request_remove_targets.emit(self._selected_ids())
+        return True
 
+    def _emit_remove_selected(self) -> bool:
 
+        ids = self._selected_ids()
+
+        if not ids:
+
+            return False
+
+        self.request_remove_targets.emit(ids)
+
+        return True
+
+    # ---- public helpers for external triggers (menu/shortcuts) ----
+
+    def ignore_selected(self) -> bool:
+
+        return self._emit_ignore_selected()
+
+    def unignore_selected(self) -> bool:
+
+        return self._emit_unignore_selected()
+
+    def remove_selected(self) -> bool:
+
+        return self._emit_remove_selected()
+
+    def copy_selected_ids(self) -> bool:
+
+        ids = self._selected_ids()
+
+        if not ids:
+
+            return False
+
+        self._copy("\n".join(str(i) for i in ids))
+
+        return True
+
+    def show_add_dialog(self):
+
+        self._show_add_dialog()
+
+    def focus_search_bar(self):
+
+        try:
+
+            self.search_bar.focus()
+
+        except AttributeError:
+
+            self.search_bar.setFocus()
+
+    def reset_sorting(self):
+
+        header = self.table.horizontalHeader()
+
+        header.setSortIndicator(2, Qt.SortOrder.DescendingOrder)
+
+        self.table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
+
+    def toggle_filters_visible(self) -> bool:
+
+        self._filters_visible = not getattr(self, "_filters_visible", True)
+
+        self.filters_row.setVisible(self._filters_visible)
+
+        return self._filters_visible
+
+    def filters_visible(self) -> bool:
+
+        return getattr(self, "_filters_visible", True)
+
+    def set_filters_visible(self, visible: bool):
+
+        self._filters_visible = bool(visible)
+
+        self.filters_row.setVisible(self._filters_visible)
+
+    def toggle_toolbar_visible(self) -> bool:
+
+        self._toolbar_visible = not getattr(self, "_toolbar_visible", True)
+
+        self.toolbar.setVisible(self._toolbar_visible)
+
+        return self._toolbar_visible
+
+    def toolbar_visible(self) -> bool:
+
+        return getattr(self, "_toolbar_visible", True)
+
+    def set_toolbar_visible(self, visible: bool):
+
+        self._toolbar_visible = bool(visible)
+
+        self.toolbar.setVisible(self._toolbar_visible)
 
     def _show_add_dialog(self):
 
         dlg = AddTargetsDialog(self)
 
-        dlg.accepted_ids.connect(lambda ids: self.request_add_targets.emit(ids) if ids else None)
+        dlg.accepted_ids.connect(
+            lambda ids: self.request_add_targets.emit(ids) if ids else None
+        )
 
         dlg.exec()
-
 
 
 # ======================================================================
@@ -3459,7 +3337,6 @@ class MainView(QWidget):
 #                       ADD TARGETS DIALOG
 
 # ======================================================================
-
 
 
 class AddTargetsDialog(QDialog):
@@ -3474,53 +3351,44 @@ class AddTargetsDialog(QDialog):
 
         lay = QVBoxLayout(self)
 
-
-
         help_lbl = QLabel(
-
             "Paste Torn profile URL(s) or ID(s). Examples:<br>"
-
             "<code>https://www.torn.com/profiles.php?XID=3212954</code><br>"
-
             "<code>3212954, 123456</code>"
-
         )
 
         help_lbl.setTextFormat(Qt.TextFormat.RichText)
 
         lay.addWidget(help_lbl)
 
-
-
         self.ed = QLineEdit()
 
-        self.ed.setPlaceholderText("Paste here... e.g. https://www.torn.com/profiles.php?XID=3212954, 123456")
+        self.ed.setPlaceholderText(
+            "Paste here... e.g. https://www.torn.com/profiles.php?XID=3212954, 123456"
+        )
 
         lay.addWidget(self.ed)
 
-
-
-        self.list_preview = QListWidget(); self.list_preview.setMinimumHeight(140)
+        self.list_preview = QListWidget()
+        self.list_preview.setMinimumHeight(140)
 
         lay.addWidget(self.list_preview)
 
+        self.lbl_count = QLabel("0 ID(s) found")
+        lay.addWidget(self.lbl_count)
 
+        btns = QHBoxLayout()
+        btns.addStretch(1)
 
-        self.lbl_count = QLabel("0 ID(s) found"); lay.addWidget(self.lbl_count)
-
-
-
-        btns = QHBoxLayout(); btns.addStretch(1)
-
-        self.btn_ok = QPushButton("Add"); self.btn_ok.setEnabled(False)
+        self.btn_ok = QPushButton("Add")
+        self.btn_ok.setEnabled(False)
 
         btn_cancel = QPushButton("Cancel")
 
-        btns.addWidget(self.btn_ok); btns.addWidget(btn_cancel)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(btn_cancel)
 
         lay.addLayout(btns)
-
-
 
         self.ed.textChanged.connect(self._reparse)
 
@@ -3530,19 +3398,21 @@ class AddTargetsDialog(QDialog):
 
         self._ids: List[int] = []
 
-
-
     def _parse_text_ids(self, text: str) -> List[int]:
 
-        text = text.strip(); ids: List[int] = []
+        text = text.strip()
+        ids: List[int] = []
 
-        if not text: return ids
+        if not text:
+            return ids
 
         for m in re.findall(r"XID=(\d+)", text, flags=re.IGNORECASE):
 
-            try: ids.append(int(m))
+            try:
+                ids.append(int(m))
 
-            except ValueError: pass
+            except ValueError:
+                pass
 
         for m in re.findall(r"\b(\d{1,10})\b", text):
 
@@ -3550,19 +3420,22 @@ class AddTargetsDialog(QDialog):
 
                 val = int(m)
 
-                if val not in ids: ids.append(val)
+                if val not in ids:
+                    ids.append(val)
 
-            except ValueError: pass
+            except ValueError:
+                pass
 
-        seen=set(); out=[]
+        seen = set()
+        out = []
 
         for i in ids:
 
-            if i not in seen: seen.add(i); out.append(i)
+            if i not in seen:
+                seen.add(i)
+                out.append(i)
 
         return out
-
-
 
     def _reparse(self):
 
@@ -3572,15 +3445,14 @@ class AddTargetsDialog(QDialog):
 
         self.list_preview.clear()
 
-        for i in ids: self.list_preview.addItem(QListWidgetItem(str(i)))
+        for i in ids:
+            self.list_preview.addItem(QListWidgetItem(str(i)))
 
         self.lbl_count.setText(f"{len(ids)} ID(s) found")
 
         self.btn_ok.setEnabled(len(ids) > 0)
 
-
-
     def _emit(self):
 
-        self.accepted_ids.emit(self._ids); self.accept()
-
+        self.accepted_ids.emit(self._ids)
+        self.accept()

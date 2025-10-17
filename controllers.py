@@ -4,11 +4,12 @@ import os
 import sys
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QSize, QPoint
-from PyQt6.QtGui import QIcon, QFontMetrics, QCursor, QColor
+from PyQt6.QtCore import Qt, QSize, QPoint, QTimer, QUrl
+from PyQt6.QtGui import QIcon, QFontMetrics, QCursor, QColor, QAction, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -21,11 +22,14 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QStyle,
+    QMenu,
+    QSizePolicy,
 )
 
 # App modules
 from views import MainView
 from storage import load_settings, save_settings, get_appdata_dir
+from documentation import DocumentationDialog
 
 # (Onboarding is triggered from main.py; we don't open it here.)
 
@@ -343,7 +347,7 @@ class HoverIcon(QLabel):
 
 class Pill(QLabel):
     """Small rounded label for meta stats."""
-    def __init__(self, text: str = "—"):
+    def __init__(self, text: str = "—", variant: str = "info"):
         super().__init__(text)
         self.setObjectName("pill")
         self.setStyleSheet("""
@@ -353,8 +357,36 @@ class Pill(QLabel):
                 border: 1px solid rgba(255,255,255,0.12);
                 background: rgba(255,255,255,0.06);
                 color: #cfd7e3;
+                font-weight: 500;
+            }
+            QLabel#pill[variant="ok"] {
+                border-color: rgba(64,191,128,0.55);
+                background: rgba(64,191,128,0.22);
+                color: #dff6e8;
+            }
+            QLabel#pill[variant="warn"] {
+                border-color: rgba(255,196,77,0.55);
+                background: rgba(255,196,77,0.20);
+                color: #ffe9c4;
+            }
+            QLabel#pill[variant="error"] {
+                border-color: rgba(255,120,120,0.55);
+                background: rgba(255,120,120,0.22);
+                color: #ffd6d6;
+            }
+            QLabel#pill[variant="muted"] {
+                border-color: rgba(255,255,255,0.08);
+                background: rgba(255,255,255,0.04);
+                color: #9aa6ba;
             }
         """)
+        self.set_variant(variant)
+
+    def set_variant(self, variant: str):
+        allowed = {"ok", "warn", "error", "muted"}
+        self.setProperty("variant", variant if variant in allowed else "")
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class FancyStatusBar(QStatusBar):
@@ -382,16 +414,41 @@ class FancyStatusBar(QStatusBar):
         self._prog.setValue(0)
         self._prog.setTextVisible(True)
         self._prog.setFormat("0/1")
+        self._prog.setToolTip("Progress")
 
-        self._meta = Pill("—")
+        self._meta_container = QWidget(self)
+        self._meta_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._meta_container.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._meta_container.setAutoFillBackground(False)
+        self._meta_container.setStyleSheet("background: transparent;")
+        self._meta_container.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred))
+        ml = QHBoxLayout(self._meta_container)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(6)
+        self._meta_layout = ml
+        self._meta_pills: list[Pill] = []
+        self._meta_placeholder = Pill("No stats", "muted")
+        ml.addWidget(self._meta_placeholder)
+
+        self._clock = Pill("Updated —", "muted")
 
         self.addWidget(self._left, 1)
         self.addPermanentWidget(self._prog, 0)
-        self.addPermanentWidget(self._meta, 0)
+        self.addPermanentWidget(self._meta_container, 0)
+        self.addPermanentWidget(self._clock, 0)
 
         self._current_errors = 0
+        self._last_timestamp: Optional[datetime] = None
+        self._last_result_ok = True
         self._set_status_icon("info")
         self._set_info_tooltip()
+
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(60000)
+        self._clock_timer.timeout.connect(self._refresh_timestamp_label)
+        self._clock_timer.start()
+        self._is_fetching = False
+        self._refresh_timestamp_label()
 
     def set_message(self, text: str):
         text = text or ""
@@ -399,8 +456,9 @@ class FancyStatusBar(QStatusBar):
         w = max(480, self._msg.width())
         self._msg.setText(fm.elidedText(text, Qt.TextElideMode.ElideRight, w))
         self._msg.setToolTip(text)
-        self.showMessage(text, 3000)
+        self.showMessage(text, 5000)
         self._apply_icon_and_color(text)
+        self._record_activity_timestamp(text)
 
     def set_progress(self, cur: int, total: int):
         total = max(1, int(total))
@@ -413,8 +471,60 @@ class FancyStatusBar(QStatusBar):
             self._prog.set_done() if self._current_errors == 0 else self._prog.set_error()
 
     def set_meta(self, text: str):
-        self._meta.setText(text or "—")
-        self._meta.setToolTip(text or "")
+        raw = (text or "").strip()
+        parts = [p.strip() for p in re.split(r"[•\u2022|]+", raw) if p.strip()]
+
+        if not parts:
+            self._meta_placeholder.setText("No stats")
+            self._meta_placeholder.show()
+            for pill in self._meta_pills:
+                pill.hide()
+            self._meta_container.setToolTip("")
+            return
+
+        self._meta_placeholder.hide()
+        while len(self._meta_pills) < len(parts):
+            pill = Pill("", "info")
+            pill.hide()
+            self._meta_pills.append(pill)
+            self._meta_layout.addWidget(pill)
+
+        for pill, part in zip(self._meta_pills, parts):
+            pill.setText(part)
+            pill.set_variant(self._classify_meta(part))
+            pill.setToolTip(part)
+            pill.show()
+
+        for pill in self._meta_pills[len(parts):]:
+            pill.hide()
+
+        self._meta_container.setToolTip(raw)
+
+    def _classify_meta(self, text: str) -> str:
+        low = text.lower()
+        if "error" in low or "fail" in low:
+            return "error"
+        if "ignore" in low or "warn" in low:
+            return "warn"
+        if any(word in low for word in ("done", "total", "visible", "cached")):
+            return "ok"
+        return "info"
+
+    def _set_fetching(self, active: bool):
+        active = bool(active)
+        if self._is_fetching == active:
+            if active:
+                self._clock.setText("Fetching…")
+                self._clock.set_variant("ok")
+                self._clock.setToolTip("Currently fetching targets…")
+            return
+        self._is_fetching = active
+        if active:
+            self._clock.setText("Fetching…")
+            self._clock.set_variant("ok")
+            self._clock.setToolTip("Currently fetching targets…")
+        else:
+            self._refresh_timestamp_label()
 
     def _set_status_icon(self, kind: str):
         # kind: info | progress | ok | warn | error
@@ -453,7 +563,6 @@ class FancyStatusBar(QStatusBar):
         self._icon.set_rich_tooltip(html, enabled=True)
 
     def _apply_icon_and_color(self, text: str):
-        import re
         self._current_errors = 0
         m = re.search(r"errors:\s*(\d+)", text, flags=re.IGNORECASE) or \
             re.search(r"\b(\d+)\s+errors\b", text, flags=re.IGNORECASE)
@@ -464,23 +573,83 @@ class FancyStatusBar(QStatusBar):
                 self._current_errors = 0
 
         low = text.lower()
+        self._set_fetching(False)
         if "done" in low:
             self._set_status_icon("ok" if self._current_errors == 0 else "error")
             (self._prog.set_done() if self._current_errors == 0 else self._prog.set_error())
+            self._set_fetching(False)
         elif "updating" in low or "fetch" in low or "loading" in low:
             self._set_status_icon("progress" if self._current_errors == 0 else "error")
             (self._prog.set_ok() if self._current_errors == 0 else self._prog.set_error())
+            self._set_fetching(True)
         elif self._current_errors > 0:
             self._set_status_icon("error")
             self._prog.set_error()
+            self._set_fetching(False)
         else:
             self._set_status_icon("info")
             self._prog.set_ok()
+            self._set_fetching(False)
 
         if self._current_errors > 0:
             self._set_error_tooltip(self._current_errors)
         else:
             self._set_info_tooltip()
+
+    def _record_activity_timestamp(self, text: str):
+        low = text.lower()
+        triggers = ("done", "export", "refresh", "updated", "loaded", "saved", "copied", "import")
+        if any(word in low for word in triggers):
+            self._last_timestamp = datetime.now(timezone.utc)
+            has_real_error = "error" in low and not re.search(r"errors?\s*:\s*0\b", low)
+            self._last_result_ok = self._current_errors == 0 and not has_real_error
+            self._refresh_timestamp_label()
+            self._set_fetching(False)
+
+    def _refresh_timestamp_label(self):
+        if self._is_fetching:
+            self._clock.setText("Fetching…")
+            self._clock.set_variant("ok")
+            self._clock.setToolTip("Currently fetching targets…")
+            return
+        if not self._clock:
+            return
+        if not self._last_timestamp:
+            self._clock.setText("Updated – never")
+            self._clock.set_variant("muted")
+            self._clock.setToolTip("No activity yet.")
+            return
+
+        now = datetime.now(timezone.utc)
+        delta = now - self._last_timestamp
+        seconds = max(0, int(delta.total_seconds()))
+
+        if seconds < 5:
+            label = "Updated – just now"
+        elif seconds < 60:
+            label = f"Updated – {seconds}s ago"
+        elif seconds < 3600:
+            minutes = seconds // 60
+            label = f"Updated – {minutes} min ago"
+        else:
+            hours = seconds // 3600
+            label = f"Updated – {hours} hr ago"
+
+        self._clock.setText(label)
+
+        if self._last_result_ok:
+            if seconds <= 180:
+                variant = "ok"
+            elif seconds <= 900:
+                variant = ""
+            else:
+                variant = "warn"
+        else:
+            variant = "error" if seconds <= 600 else "warn"
+
+        self._clock.set_variant(variant)
+        local_dt = self._last_timestamp.astimezone()
+        self._clock.setToolTip(local_dt.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
 
 class MainWindow(QMainWindow):
@@ -504,7 +673,174 @@ class MainWindow(QMainWindow):
         self._status = FancyStatusBar(self)
         self.setStatusBar(self._status)
 
+        self._menu_actions: dict[str, QAction] = {}
+        self._build_menu()
+
         self._controller = None  # set via attach_controller()
+
+    # -------- menu + helpers --------
+
+    def _build_menu(self):
+        bar = self.menuBar()
+        try:
+            bar.setNativeMenuBar(False)
+            bar.setStyleSheet("")
+        except Exception:
+            pass
+
+        file_menu = bar.addMenu("&File")
+        file_menu.addAction(self._create_action("Refresh Targets", "refresh", "Ctrl+R", self._trigger_refresh))
+        file_menu.addSeparator()
+        file_menu.addAction(self._create_action("Export CSV...", "csv", "Ctrl+E", self._trigger_export_csv))
+        file_menu.addAction(self._create_action("Export JSON...", "json", "Ctrl+Shift+E", self._trigger_export_json))
+        file_menu.addSeparator()
+        file_menu.addAction(self._create_action("Load Targets JSON...", "folder-open", "Ctrl+O", self._trigger_load_targets))
+        file_menu.addAction(self._create_action("Settings...", "settings", "Ctrl+,", self._trigger_open_settings))
+        file_menu.addSeparator()
+        file_menu.addAction(self._create_action("Exit", "cancel", "Ctrl+Q", self.close))
+
+        targets_menu = bar.addMenu("&Targets")
+        targets_menu.addAction(self._create_action("Add Targets...", "add", "Ctrl+N", self._trigger_add_targets))
+        targets_menu.addAction(self._create_action("Remove Selected", "delete", "Del", self._trigger_remove_selected))
+        targets_menu.addSeparator()
+        targets_menu.addAction(self._create_action("Ignore Selected", "block", None, self._trigger_ignore_selected))
+        targets_menu.addAction(self._create_action("Unignore Selected", "unblock", None, self._trigger_unignore_selected))
+        targets_menu.addAction(self._create_action("Manage Ignored...", "block", None, self._trigger_manage_ignore))
+        targets_menu.addSeparator()
+        targets_menu.addAction(self._create_action("Copy Selected IDs", "id", "Ctrl+Shift+C", self._trigger_copy_ids))
+
+        view_menu = bar.addMenu("&View")
+        self._act_view_toolbar = self._create_action("Show Toolbar", "apply", checkable=True)
+        self._act_view_toolbar.setChecked(self.view.toolbar_visible())
+        self._act_view_toolbar.toggled.connect(self._toggle_toolbar)
+        view_menu.addAction(self._act_view_toolbar)
+
+        self._act_view_filters = self._create_action("Show Filters", "data", checkable=True)
+        self._act_view_filters.setChecked(self.view.filters_visible())
+        self._act_view_filters.toggled.connect(self._toggle_filters)
+        view_menu.addAction(self._act_view_filters)
+
+        view_menu.addSeparator()
+        view_menu.addAction(self._create_action("Focus Search", "search", "Ctrl+F", self._trigger_focus_search))
+        view_menu.addAction(self._create_action("Reset Sorting", "refresh", None, self._trigger_reset_sort))
+
+        help_menu = bar.addMenu("&Help")
+        help_menu.addAction(self._create_action("Open Documentation", "help", "F1", self._open_docs))
+        help_menu.addAction(self._create_action("Open App Data Folder", "folder-open", None, self._open_appdata_dir))
+        help_menu.addSeparator()
+        help_menu.addAction(self._create_action("About Target Tracker", "info", None, self._trigger_about))
+
+    def _create_action(self, text: str, icon_name: str, shortcut: Optional[str] = None, slot=None, checkable: bool = False) -> QAction:
+        act = QAction(themed_icon(icon_name), text, self)
+        if shortcut:
+            act.setShortcut(shortcut)
+        act.setCheckable(checkable)
+        if slot:
+            act.triggered.connect(slot)
+        self._menu_actions[text] = act
+        return act
+
+    def _notify(self, message: str):
+        if self._status:
+            self._status.set_message(message)
+
+    # -------- action handlers --------
+
+    def _trigger_refresh(self):
+        self.view.request_refresh.emit()
+        self._notify("Refreshing targets…")
+
+    def _trigger_export_csv(self):
+        self.view.request_export.emit()
+        self._notify("Exporting CSV…")
+
+    def _trigger_export_json(self):
+        self.view.request_export_json.emit()
+        self._notify("Exporting JSON…")
+
+    def _trigger_load_targets(self):
+        self.view.request_load_targets.emit()
+        self._notify("Select a targets JSON file…")
+
+    def _trigger_open_settings(self):
+        self.view.request_open_settings.emit()
+        self._notify("Opening settings…")
+
+    def _trigger_add_targets(self):
+        self.view.show_add_dialog()
+        self._notify("Add targets dialog opened.")
+
+    def _trigger_remove_selected(self):
+        if self.view.remove_selected():
+            self._notify("Removal requested for selected targets.")
+        else:
+            self._notify("Select targets to remove.")
+
+    def _trigger_ignore_selected(self):
+        if self.view.ignore_selected():
+            self._notify("Selected targets marked as ignored.")
+        else:
+            self._notify("Select targets to ignore.")
+
+    def _trigger_unignore_selected(self):
+        if self.view.unignore_selected():
+            self._notify("Selected targets marked as unignored.")
+        else:
+            self._notify("Select targets to unignore.")
+
+    def _trigger_manage_ignore(self):
+        self.view.request_manage_ignore.emit()
+        self._notify("Opening ignore manager…")
+
+    def _trigger_copy_ids(self):
+        if self.view.copy_selected_ids():
+            self._notify("Copied selected ID(s) to clipboard.")
+        else:
+            self._notify("Select at least one target to copy IDs.")
+
+    def _trigger_focus_search(self):
+        self.view.focus_search_bar()
+        self._notify("Search bar focused.")
+
+    def _trigger_reset_sort(self):
+        self.view.reset_sorting()
+        self._notify("Sorting reset to default.")
+
+    def _toggle_filters(self, checked: bool):
+        self.view.set_filters_visible(checked)
+        self._notify("Filters shown." if checked else "Filters hidden.")
+
+    def _toggle_toolbar(self, checked: bool):
+        self.view.set_toolbar_visible(checked)
+        self._notify("Toolbar shown." if checked else "Toolbar hidden.")
+
+    def _open_appdata_dir(self):
+        path = get_appdata_dir()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+        self._notify("Opened app data folder.")
+
+    def _open_docs(self):
+        try:
+            dlg = DocumentationDialog(self)
+            dlg.exec()
+            self._notify("Documentation opened.")
+        except Exception as exc:
+            doc = _first_existing([
+                "README.md",
+                os.path.join("assets", "Updated_README.rtf"),
+                os.path.join("assets", "README.rtf"),
+            ])
+            if doc and os.path.exists(doc):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(doc)))
+                self._notify("Opened fallback documentation.")
+            else:
+                QDesktopServices.openUrl(QUrl("https://github.com/"))
+                self._notify("Opened online documentation.")
+            logger.exception("Failed to open documentation dialog: %s", exc)
+
+    def _trigger_about(self):
+        self.view.request_show_about.emit()
+        self._notify("About dialog opened.")
 
     def attach_controller(self, controller):
         """Attach the app Controller and wire status callbacks."""

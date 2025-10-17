@@ -92,6 +92,7 @@ class SettingsDialog(QDialog):
     Preserves all logic (signals, payload, retries/backoff, etc.).
     """
     saved = pyqtSignal(dict)
+    apiTestFinished = pyqtSignal(str, str, str)
 
     def __init__(self, settings: Dict, parent=None):
         super().__init__(parent)
@@ -151,6 +152,10 @@ class SettingsDialog(QDialog):
         self.btn_defaults = QPushButton("Restore Defaults"); self.btn_defaults.setProperty("role", "ghost")
         fl.addWidget(self.btn_defaults); fl.addStretch(1)
 
+        self.lbl_footer_status = QLabel("")
+        self.lbl_footer_status.setObjectName("footerStatus")
+        fl.addWidget(self.lbl_footer_status)
+
         self.btn_ok = QPushButton("OK"); self.btn_cancel = QPushButton("Cancel"); self.btn_apply = QPushButton("Apply")
         self.btn_ok.setProperty("role", "primary"); self.btn_apply.setProperty("role", "primary"); self.btn_apply.setEnabled(False)
         for b in (self.btn_ok, self.btn_cancel, self.btn_apply):
@@ -164,6 +169,11 @@ class SettingsDialog(QDialog):
         self.btn_cancel.clicked.connect(self._maybe_discard_and_close)
         self.btn_ok.clicked.connect(self._save_and_close)
         self.btn_apply.clicked.connect(self._apply)
+
+        self._footer_timer = QTimer(self)
+        self._footer_timer.setSingleShot(True)
+        self._footer_timer.timeout.connect(self._clear_footer_status)
+        self.apiTestFinished.connect(self._handle_api_test_result)
 
         # Shortcuts
         QShortcut(QKeySequence.StandardKey.Save, self, self._apply)
@@ -311,6 +321,11 @@ class SettingsDialog(QDialog):
 
 /* Footer */
 #TTSettingsRoot QWidget#footer { border-top: 1px solid #4a4a4a; }
+#TTSettingsRoot QLabel#footerStatus {
+    color: #c7d6ec;
+    padding-right: 12px;
+    font-size: 11px;
+}
 
 /* Help text + mono chip */
 #TTSettingsRoot QLabel.helpSmall { color: #d0d0d0; }
@@ -572,6 +587,7 @@ class SettingsDialog(QDialog):
         self._dirty = True
         self.btn_apply.setEnabled(True)
         self._refresh_header_summary()
+        self._set_footer_status("")
 
     def _refresh_header_summary(self):
         target_path = (self.ed_targets.text().strip() if hasattr(self, "ed_targets") else "") or self._settings.get("targets_file", "target.json")
@@ -581,6 +597,32 @@ class SettingsDialog(QDialog):
         auto_val = int(self.sb_auto.value()) if hasattr(self, "sb_auto") else int(self._settings.get("auto_refresh_sec", 0))
         auto_state = f"Auto refresh {auto_val}s" if auto_val else "Auto refresh off"
         self.lblSummary.setText(f"{api_state}  •  Targets: {target_name}  •  {auto_state}")
+
+    def _set_footer_status(self, text: str, kind: str = "info", timeout_ms: int = 3000):
+        if not hasattr(self, "lbl_footer_status"):
+            return
+        if not text:
+            self._footer_timer.stop()
+            self._clear_footer_status()
+            return
+        palette = {
+            "info": "#c7d6ec",
+            "success": "#8ee6b3",
+            "warn": "#ffd27d",
+            "error": "#ff9b8e",
+        }
+        color = palette.get(kind, palette["info"])
+        self.lbl_footer_status.setStyleSheet(f"color: {color};")
+        self.lbl_footer_status.setText(text)
+        self._footer_timer.stop()
+        if text and timeout_ms:
+            self._footer_timer.start(timeout_ms)
+
+    def _clear_footer_status(self):
+        if hasattr(self, "lbl_footer_status"):
+            self._footer_timer.stop()
+            self.lbl_footer_status.setText("")
+            self.lbl_footer_status.setStyleSheet("")
 
     def _paste_api(self):
         try:
@@ -602,10 +644,20 @@ class SettingsDialog(QDialog):
         )
 
     def _test_key(self):
-        """Robust key test: no GUI access off-thread, timeouts & guaranteed cleanup."""
+        """Robust key test mirroring the onboarding dialog behaviour."""
         key = self.ed_api.text().strip()
         if not key:
+            QMessageBox.information(self, "Test Key", "Please paste your API key first.")
             self.lbl_api_status.setText("<span style='color:#ff9b8e'>No key entered.</span>")
+            self._set_footer_status("Paste an API key to test.", "warn", timeout_ms=4000)
+            return
+
+        try:
+            import requests  # noqa: F401
+        except Exception:
+            QMessageBox.warning(self, "Test Key", "The 'requests' package is not installed.")
+            self.lbl_api_status.setText("<span style='color:#ff9b8e'>'requests' package missing.</span>")
+            self._set_footer_status("'requests' package missing. Install requirements.", "error", timeout_ms=5000)
             return
 
         honor_retry_after = bool(self.chk_retry_after.isChecked()) if hasattr(self, "chk_retry_after") else True
@@ -616,26 +668,35 @@ class SettingsDialog(QDialog):
 
         self.lbl_api_status.setText("<span class='helpSmall'>Testing against Torn…</span>")
 
+        result = {"status": "", "kind": "", "text": ""}
+
         def worker():
             import time
             url = f"https://api.torn.com/user/?selections=basic&key={key}"
             headers = {"User-Agent": "TargetTracker/1.0 (+pyqt)"}
             timeout = (6, 8)
             max_attempts = 3
-            msg = ""
 
             try:
                 for attempt in range(1, max_attempts + 1):
                     try:
                         r = requests.get(url, headers=headers, timeout=timeout)
                     except requests.Timeout:
-                        msg = "<span style='color:#ff9b8e'>Timed out. Network slow?</span>"
+                        result.update(
+                            status="<span style='color:#ff9b8e'>Timed out. Network slow?</span>",
+                            kind="warn",
+                            text="Request timed out. Network slow?",
+                        )
                         if attempt < max_attempts:
                             time.sleep(0.6 * attempt)
                             continue
                         break
                     except Exception as e:
-                        msg = f"<span style='color:#ff9b8e'>Request failed: {e}</span>"
+                        result.update(
+                            status=f"<span style='color:#ff9b8e'>Request failed: {e}</span>",
+                            kind="error",
+                            text=f"Request failed: {e}",
+                        )
                         break
 
                     if r.status_code == 429:
@@ -646,16 +707,21 @@ class SettingsDialog(QDialog):
                         except Exception:
                             wait_s = 0
                         if honor_retry_after and wait_s and attempt < max_attempts:
-                            msg_wait = f"<span style='color:#ffd27d'>Rate limited (429). Retrying in {min(wait_s,5)}s…</span>"
-                            QTimer.singleShot(0, lambda m=msg_wait: self.lbl_api_status.setText(m))
                             time.sleep(min(wait_s, 5))
                             continue
-                        else:
-                            msg = "<span style='color:#ff9b8e'>Rate limited (429). Try again shortly.</span>"
-                            break
+                        result.update(
+                            status="<span style='color:#ff9b8e'>Rate limited (429). Try again shortly.</span>",
+                            kind="warn",
+                            text="Rate limited (429). Try again shortly.",
+                        )
+                        break
 
                     if not r.ok:
-                        msg = f"<span style='color:#ff9b8e'>HTTP {r.status_code} while checking key.</span>"
+                        result.update(
+                            status=f"<span style='color:#ff9b8e'>HTTP {r.status_code} while checking key.</span>",
+                            kind="error",
+                            text=f"HTTP {r.status_code} while checking key.",
+                        )
                         if r.status_code >= 500 and attempt < max_attempts:
                             time.sleep(0.6 * attempt)
                             continue
@@ -664,30 +730,54 @@ class SettingsDialog(QDialog):
                     try:
                         data = r.json()
                     except Exception:
-                        msg = "<span style='color:#ff9b8e'>Non-JSON response from Torn.</span>"
+                        result.update(
+                            status="<span style='color:#ff9b8e'>Non-JSON response from Torn.</span>",
+                            kind="error",
+                            text="Non-JSON response from Torn.",
+                        )
                         break
 
                     if isinstance(data, dict) and "error" in data:
                         code = data["error"].get("code")
                         desc = data["error"].get("error") or "Unknown error"
                         hint = " (Incorrect/expired key?)" if code in (1, 2) else (" (Temporarily rate-limited.)" if code in (5, 9) else "")
-                        msg = f"<span style='color:#ff9b8e'>API error {code}: {desc}{hint}</span>"
+                        result.update(
+                            status=f"<span style='color:#ff9b8e'>API error {code}: {desc}{hint}</span>",
+                            kind="error",
+                            text=f"API error {code}: {desc}{hint}",
+                        )
                         break
 
                     name = data.get("name") or "OK"
                     pid = data.get("player_id")
                     who = f"{name} (ID: {pid})" if pid else name
-                    msg = f"<span style='color:#8ee6b3'>Valid. Hello, {who}.</span>"
+                    result.update(
+                        status=f"<span style='color:#8ee6b3'>Valid. Hello, {who}.</span>",
+                        kind="info",
+                        text=f"Success! Authenticated as: {who}.",
+                    )
                     break
             finally:
-                def done():
-                    self.lbl_api_status.setText(msg or "<span style='color:#ff9b8e'>Test ended unexpectedly.</span>")
-                    if hasattr(self, "btn_test"):
-                        self.btn_test.setEnabled(True)
-                        self.btn_test.setText("Test key")
-                QTimer.singleShot(0, done)
+                status = result["status"] or "<span style='color:#ff9b8e'>Test ended unexpectedly.</span>"
+                kind = result["kind"] or ""
+                text = result["text"] or ""
+                self.apiTestFinished.emit(status, kind, text)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_api_test_result(self, status_html: str, kind: str, message: str):
+        self.lbl_api_status.setText(status_html)
+        if hasattr(self, "btn_test"):
+            self.btn_test.setEnabled(True)
+            self.btn_test.setText("Test key")
+        if kind == "info" and message:
+            QMessageBox.information(self, "Test Key", message)
+            self._set_footer_status("API key validated.", "success")
+        elif kind in ("warn", "error") and message:
+            QMessageBox.warning(self, "Test Key", message)
+            self._set_footer_status(message, "warn" if kind == "warn" else "error", timeout_ms=5000)
+        else:
+            self._set_footer_status("", timeout_ms=0)
 
     def _pick_targets(self):
         p, _ = QFileDialog.getOpenFileName(self, "Pick targets JSON", "", "JSON (*.json)")
@@ -841,6 +931,7 @@ class SettingsDialog(QDialog):
         self._dirty = False
         self.btn_apply.setEnabled(False)
         self._refresh_header_summary()
+        self._set_footer_status("Settings applied.", "success")
 
     def _save_and_close(self):
         self._apply()
@@ -879,3 +970,7 @@ class SettingsDialog(QDialog):
         self._update_cache_info()
         self._update_effective_pacing()
         self._update_backoff_preview()
+        self._refresh_header_summary()
+        self._dirty = True
+        self.btn_apply.setEnabled(True)
+        self._set_footer_status("Defaults restored. Click Apply to keep them.", "info")

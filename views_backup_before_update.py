@@ -2181,31 +2181,20 @@ class AboutDialog(QDialog):
             return tuple(nums)
 
         def _is_newer(remote: str, local: str) -> bool:
-            if not remote:
-                return False
-            local = local or "0"
-            if pkg_version is not None:
-                try:
-                    newer = pkg_version.parse(remote) > pkg_version.parse(local)
-                    self._log.info(
-                        "Compare versions (packaging): remote=%s local=%s -> newer=%s",
-                        remote,
-                        local,
-                        newer,
-                    )
-                    return newer
-                except Exception as exc:
-                    self._log.info("Version parse via packaging failed: %s", exc)
+
             r, l = _parse_version(remote), _parse_version(local)
+
             newer = r > l
+
             self._log.info(
-                "Compare versions (fallback tuple): remote=%s parsed=%s  local=%s parsed=%s  -> newer=%s",
+                "Compare versions: remote=%s parsed=%s  local=%s parsed=%s  -> newer=%s",
                 remote,
                 r,
                 local,
                 l,
                 newer,
             )
+
             return newer
 
         self.local_version = _detect_local_version()
@@ -2570,83 +2559,125 @@ class AboutDialog(QDialog):
 
 
         def _extract_version_candidate(data) -> Optional[str]:
-            """Return a semantic version string if present."""
-            if isinstance(data, dict):
-                latest = data.get("latest")
-                if isinstance(latest, dict):
-                    ver = latest.get("version")
-                    if isinstance(ver, str) and ver.strip():
-                        return ver.strip()
-                ver = data.get("version")
-                if isinstance(ver, str) and ver.strip():
-                    return ver.strip()
-                tracks = data.get("tracks")
+            """
+            Attempt to pull the best version string out of arbitrary JSON / text.
+            Priority:
+              1. Tracks for our app id
+              2. Dict/list entries containing version keys
+              3. Regex scan constrained to our app id
+              4. Any semantic version pattern
+            """
+
+            def _from_tracks(tracks) -> Optional[str]:
                 if isinstance(tracks, dict):
                     for track in tracks.values():
                         if isinstance(track, dict):
                             ver = track.get("version")
-                            if isinstance(ver, str) and ver.strip():
-                                return ver.strip()
+                            if ver:
+                                return str(ver).strip()
+                return None
+
+            if isinstance(data, dict):
+                latest = data.get("latest")
+                if isinstance(latest, dict):
+                    ver = latest.get("version")
+                    if ver:
+                        return str(ver).strip()
+
+            if isinstance(data, dict):
+                # Direct app entry?
+                if data.get("id") == VERSION_APP_ID:
+                    ver = _from_tracks(data.get("tracks"))
+                    if ver:
+                        return ver
+                    by_code = data.get("code")
+                    if by_code:
+                        return str(by_code)
+
+                # Nested list of apps?
                 for key in ("apps", "data", "items"):
-                    value = data.get(key)
-                    if value is not None:
-                        candidate = _extract_version_candidate(value)
+                    if key in data and isinstance(data[key], (list, tuple)):
+                        candidate = _extract_version_candidate(data[key])
                         if candidate:
                             return candidate
-                return None
+
+                # Generic scan of values
+                for value in data.values():
+                    candidate = _extract_version_candidate(value)
+                    if candidate:
+                        return candidate
+
             if isinstance(data, (list, tuple, set)):
                 for item in data:
                     candidate = _extract_version_candidate(item)
                     if candidate:
                         return candidate
-                return None
+
             if isinstance(data, str):
-                for match in re.findall(r'"version"\s*:\s*"([^"]+)"', data, flags=re.IGNORECASE):
-                    candidate = match.strip()
-                    if candidate:
-                        return candidate
-                return None
+                text_val = data
+                pattern_app = (
+                    rf'"id"\s*:\s*"{re.escape(VERSION_APP_ID)}".*?'
+                    r'"version"\s*:\s*"([0-9][^"]+)"'
+                )
+                m = re.search(pattern_app, text_val, re.IGNORECASE | re.DOTALL)
+                if m:
+                    return m.group(1).strip()
+
+                pattern_inline = (
+                    rf'{re.escape(VERSION_APP_ID)}[^\d]{{0,30}}([0-9]+(?:\.[0-9]+)+)'
+                )
+                m = re.search(pattern_inline, text_val, re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
+
+                m = re.search(r'\d+(?:\.\d+)+', text_val)
+                if m:
+                    return m.group(0)
+
             return None
 
 
 
         def _fetch_remote_version() -> Optional[str]:
+
             for url in self.VERSION_ENDPOINTS:
                 try:
                     self._log.info("Fetch version info: %s", url)
-                    response = requests.get(url, headers=headers, timeout=6)
-                    body = response.text or ""
-                    self._log.info("Status=%s len=%s", response.status_code, len(body))
-                    if not response.ok:
+                    r = requests.get(url, headers=headers, timeout=6)
+                    text = r.text or ""
+                    self._log.info("Status=%s len=%s", r.status_code, len(text))
+                    if not r.ok:
                         continue
-
-                    primary_json = "format=json" in url and "app=target-tracker" in url
-                    candidate: Optional[str] = None
-
-                    if "format=json" in url:
+                    candidate = None
+                    if "format=code" in url:
+                        candidate = _extract_version_candidate(text.strip())
+                    else:
                         try:
-                            data = response.json()
+                            data = r.json()
                         except Exception as exc:
                             self._log.info("JSON parse err (%s): %s", url, exc)
+                            candidate = _extract_version_candidate(text)
                         else:
-                            candidate = _extract_version_candidate(data)
-                            if candidate:
-                                self._log.info("Remote version candidate (JSON): %s", candidate)
-                                return candidate.strip()
-                            if primary_json:
-                                # For the canonical endpoint, skip unstructured fallbacks.
-                                continue
-
-                    if "format=code" in url:
-                        candidate = _extract_version_candidate(body)
-                    if candidate is None and not primary_json:
-                        candidate = _extract_version_candidate(body)
-
+                            candidate = None
+                            if isinstance(data, dict):
+                                latest = data.get("latest")
+                                if isinstance(latest, dict):
+                                    ver = latest.get("version")
+                                    if ver:
+                                        candidate = str(ver).strip()
+                                if not candidate:
+                                    ver = data.get("version")
+                                    if ver:
+                                        candidate = str(ver).strip()
+                            if not candidate:
+                                candidate = _extract_version_candidate(data)
+                            if not candidate:
+                                candidate = _extract_version_candidate(text)
                     if candidate:
                         self._log.info("Remote version candidate: %s", candidate)
                         return candidate.strip()
-                except Exception as exc:
-                    self._log.info("Version fetch err (%s): %s", url, exc)
+                except Exception as e:
+                    self._log.info("Version fetch err (%s): %s", url, e)
 
             return None
 

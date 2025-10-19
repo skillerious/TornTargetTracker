@@ -4,10 +4,12 @@ import json
 import os
 import logging
 import threading
+import socket
 from typing import List, Set, Callable, Optional, Dict
 
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal, QUrl
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 # App modules
 from models import TargetInfo
@@ -40,6 +42,7 @@ if not logger.handlers:
 
 
 class Controller(QObject):
+    onlineChanged = pyqtSignal(bool)
     """
     Controller with incremental UI updates to prevent table jumping while fetching.
     Shutdown-aware: exposes shutdown() to stop workers and timers on app close.
@@ -61,16 +64,19 @@ class Controller(QObject):
         # Prevent updates for removed IDs mid-flight
         self._current_target_set: Set[int] = set()
 
+        # UI status callbacks (set from MainWindow)
+        self._set_status: Optional[Callable[[str], None]] = None
+        self._set_progress: Optional[Callable[[int, int], None]] = None
+        self._set_meta: Optional[Callable[[str], None]] = None
+        self._set_auto_eta: Optional[Callable[[Optional[int]], None]] = None
+        self._auto_eta_state: Optional[int] = -1
+
         # Auto-refresh
         self._auto_timer = QTimer(self)
         self._auto_timer.setSingleShot(True)
         self._auto_timer.timeout.connect(self.refresh)
         self._auto_interval = 65  # seconds
-
-        # UI status callbacks (set from MainWindow)
-        self._set_status: Optional[Callable[[str], None]] = None
-        self._set_progress: Optional[Callable[[int, int], None]] = None
-        self._set_meta: Optional[Callable[[str], None]] = None
+        self._notify_auto_eta(-1)
 
         # Fetch machinery & accounting
         self._fetcher: Optional[BatchFetcher] = None
@@ -97,6 +103,19 @@ class Controller(QObject):
         self.view.unignore_ids.connect(self.unignore_ids_remove)
         self.view.set_ignored(self.ignored)
 
+        # Connectivity monitoring (single QNetworkAccessManager + periodic HEAD)
+        self._netman = QNetworkAccessManager(self)
+        self._pending_connectivity_reply: Optional[QNetworkReply] = None
+        self._is_online = True
+        self._connectivity_check_in_progress = False
+        self._last_offline_reason = ""
+        self._connectivity_timer = QTimer(self)
+        self._connectivity_timer.setInterval(5000)
+        self._connectivity_timer.timeout.connect(self._check_connectivity)
+        self._connectivity_timer.start()
+        self._offline_prompt_shown = False
+        QTimer.singleShot(0, self._check_connectivity)
+
         self._update_auto_timer()
 
         logger.info(
@@ -115,10 +134,14 @@ class Controller(QObject):
         status_cb: Callable[[str], None],
         progress_cb: Callable[[int, int], None],
         meta_cb: Callable[[str], None],
+        auto_cb: Optional[Callable[[Optional[int]], None]] = None,
     ):
         self._set_status = status_cb
         self._set_progress = progress_cb
         self._set_meta = meta_cb
+        self._set_auto_eta = auto_cb
+        if auto_cb is not None:
+            auto_cb(self._auto_eta_state)
 
     def _status(self, text: str):
         logger.debug("STATUS: %s", text)
@@ -135,6 +158,11 @@ class Controller(QObject):
             return
         visible = self._visible_count()
         self._set_meta(f"{cur} / {total}    •   Total: {total} • Ignored: {len(self.ignored)} • Visible: {visible}")
+
+    def _notify_auto_eta(self, seconds: Optional[int]):
+        self._auto_eta_state = seconds
+        if self._set_auto_eta:
+            self._set_auto_eta(seconds)
 
     def _visible_count(self) -> int:
         if not self.rows:
@@ -179,6 +207,130 @@ class Controller(QObject):
         self.view.set_rows(self.rows)
         self.view.set_ignored(self.ignored)
 
+    # ---------------- Connectivity ----------------
+
+    def is_online(self) -> bool:
+        return self._is_online
+
+    def _check_connectivity(self):
+        if self._connectivity_check_in_progress:
+            return
+
+        self._connectivity_check_in_progress = True
+        if (
+            self._pending_connectivity_reply is not None
+            and not self._pending_connectivity_reply.isFinished()
+        ):
+            # Still waiting on a previous probe; skip to avoid piling up requests.
+            self._connectivity_check_in_progress = False
+            return
+
+        try:
+            request = QNetworkRequest(QUrl("https://api.torn.com/ping"))
+            follow_attr = getattr(
+                QNetworkRequest.Attribute, "FollowRedirectsAttribute", None
+            )
+            if follow_attr is not None:
+                request.setAttribute(follow_attr, True)
+            request.setRawHeader(
+                b"User-Agent",
+                b"TargetTracker/2.6 (connectivity)",
+            )
+            reply = self._netman.head(request)
+            self._pending_connectivity_reply = reply
+            reply.finished.connect(lambda r=reply: self._handle_connectivity_reply(r))
+        except Exception as exc:
+            logger.warning("Connectivity HEAD failed to start: %s", exc)
+            self._connectivity_check_in_progress = False
+            online, reason = self._fallback_socket_probe()
+            self._apply_connectivity_result(online, reason if not online else "")
+
+    def _handle_connectivity_reply(self, reply: QNetworkReply):
+        self._connectivity_check_in_progress = False
+        if self._pending_connectivity_reply is reply:
+            self._pending_connectivity_reply = None
+
+        status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        error = reply.error()
+        reason = reply.errorString() or ""
+
+        if error == QNetworkReply.NetworkError.OperationCanceledError:
+            reply.deleteLater()
+            return
+
+        online = False
+        if error == QNetworkReply.NetworkError.NoError:
+            online = True
+        elif status is not None:
+            # HTTP response received (even 4xx/5xx) implies connectivity.
+            try:
+                status_code = int(status)
+            except (TypeError, ValueError):
+                status_code = None
+            if status_code is not None and status_code > 0:
+                online = True
+
+        logger.debug(
+            "Connectivity check: status=%s error=%s online=%s",
+            status,
+            error,
+            online,
+        )
+
+        reply.deleteLater()
+        self._apply_connectivity_result(online, reason if not online else "")
+
+    def _fallback_socket_probe(self) -> tuple[bool, str]:
+        try:
+            with socket.create_connection(("api.torn.com", 443), timeout=3):
+                return True, ""
+        except OSError as exc:
+            return False, str(exc)
+
+    def _apply_connectivity_result(self, online: bool, reason: str = ""):
+        self._connectivity_check_in_progress = False
+        online = bool(online)
+        if online == self._is_online:
+            return
+
+        self._is_online = online
+        self.onlineChanged.emit(online)
+
+        if online:
+            self._status("Back online. Refresh enabled.")
+            if self._set_meta:
+                self._set_meta("Online")
+            self._offline_prompt_shown = False
+            if self._current_target_set and not self._auto_timer.isActive():
+                self._schedule_next_auto_refresh()
+            self._last_offline_reason = ""
+        else:
+            reason = reason.strip()
+            self._last_offline_reason = reason
+            msg = "Offline: No internet connection detected."
+            if reason:
+                msg = f"{msg} ({reason})"
+            self._status(msg)
+            if self._set_meta:
+                self._set_meta("Offline")
+            self._auto_timer.stop()
+            self._notify_auto_eta(None)
+            if not self._offline_prompt_shown:
+                try:
+                    text = (
+                        "No internet connection detected. Refresh controls have been disabled until you're back online."
+                    )
+                    if reason:
+                        text += f"\n\nDetails: {reason}"
+                    QMessageBox.warning(
+                        self.view,
+                        "Offline",
+                        text,
+                    )
+                except Exception:
+                    pass
+                self._offline_prompt_shown = True
+
     # ---------------- Refresh / Fetching ----------------
 
     def refresh(self):
@@ -187,8 +339,30 @@ class Controller(QObject):
             self._status("Fetch already in progress…")
             logger.warning("Refresh skipped: fetch already in progress.")
             return
+        if not self._is_online:
+            reason = self._last_offline_reason.strip()
+            msg = "Offline: Unable to refresh without internet."
+            if reason:
+                msg = f"{msg} ({reason})"
+            self._status(msg)
+            sender = self.sender()
+            if not isinstance(sender, QTimer) and not self._offline_prompt_shown:
+                try:
+                    text = "Unable to refresh because no internet connection is available."
+                    if reason:
+                        text += f"\n\nDetails: {reason}"
+                    QMessageBox.warning(
+                        self.view,
+                        "Offline",
+                        text,
+                    )
+                except Exception:
+                    pass
+                self._offline_prompt_shown = True
+            return
 
         self._auto_timer.stop()
+        self._notify_auto_eta(None)
 
         ids = self.targets_list()
         self._current_target_set = set(ids)
@@ -457,16 +631,20 @@ class Controller(QObject):
             self._auto_interval = 65
             logger.info("Auto-refresh interval set to default: %s second(s)", self._auto_interval)
         self._auto_timer.stop()
+        self._notify_auto_eta(-1 if self._auto_interval <= 0 else None)
 
     def _schedule_next_auto_refresh(self):
         if self._shutdown_event.is_set():
             return
         if self._auto_interval <= 0:
+            self._notify_auto_eta(-1)
             return
         if not self._current_target_set:
+            self._notify_auto_eta(None)
             return
         self._auto_timer.stop()
         self._auto_timer.start(self._auto_interval * 1000)
+        self._notify_auto_eta(self._auto_interval)
         logger.info("Next auto refresh scheduled in %s second(s)", self._auto_interval)
 
     # ---------------- First-run helpers ----------------
@@ -510,6 +688,14 @@ class Controller(QObject):
         try:
             self._shutdown_event.set()
             self._auto_timer.stop()
+            self._connectivity_timer.stop()
+            if self._pending_connectivity_reply is not None:
+                try:
+                    self._pending_connectivity_reply.abort()
+                except Exception:
+                    pass
+                self._pending_connectivity_reply.deleteLater()
+                self._pending_connectivity_reply = None
             if self._fetcher is not None:
                 self._fetcher.stop(wait_ms=2000)
                 self._fetcher = None

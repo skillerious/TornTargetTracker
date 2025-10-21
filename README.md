@@ -1,199 +1,182 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/ChatGPT-Image-Oct-11-2025-01_58_44-PM.png" alt="Target Tracker Logo 1" height="120">
+<img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/ChatGPT-Image-Oct-11-2025-01_58_44-PM.png" alt="Target Tracker logo 1" height="120">
 &nbsp;&nbsp;&nbsp;&nbsp;
-<img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/ChatGPT-Image-Oct-11-2025-02_08_00-PM.png" alt="Target Tracker Logo 2" height="120">
+<img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/ChatGPT-Image-Oct-11-2025-02_08_00-PM.png" alt="Target Tracker logo 2" height="120">
 
 # Target Tracker
-**A fan‑made desktop tool for Torn.com players to keep tabs on targets for chains and daily hunting.**  
-_Not affiliated with Torn.com. Use at your own risk and respect the game's API rules._
+**A fan-made desktop assistant for Torn.com players who keep personal target lists for chains, dailies, or revives.**  
+_Not affiliated with Torn.com. Respect the game's API rules and your key's access level._
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![GUI](https://img.shields.io/badge/GUI-PyQt6-41b883)
-![Status](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20Linux%20%7C%20macOS-555)
+![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20macOS%20%7C%20Linux-555)
 
 </div>
 
 ---
 
-## ✨ What it does
-
-Target Tracker reads **public player details via the Torn API** using your **personal API key** and gives you a fast, glanceable table of your targets, including:
-
-- **Status chip** — _Okay / Hospital / Jail / Abroad_ at a glance  
-- **Level** and **last seen / last action** timestamps  
-- **Batch refresh** with a **configurable concurrency** (fast but API‑friendly)  
-- **Local caching** to avoid unnecessary re-fetches between runs  
-- **Ignore list** support (skip IDs you don’t want to monitor)  
-- **In-app target editor** to **add/edit targets** during onboarding or anytime  
-- **One-click exports** — produce CSV or JSON snapshots whenever you need them  
-- **Built-in documentation** — Help → Open Documentation launches a full walkthrough  
-- **Polished PyQt6 UI** with a compact, dark layout  
-
-> This is a community tool built for convenience. It only reads data you permit via your API key and never posts to Torn.
+## Highlights
+- Live, color-coded target table with status chips, level, faction, timers, and per-row diagnostics.
+- Search bar with field scope, regex toggle, case sensitivity, status filters, level bounds, and a hide-ignored option.
+- Auto-refresh engine with countdown pill, online/offline detection, and manual refresh guardrails.
+- Safe concurrent fetching backed by a global rate limiter, exponential backoff, and cooperative shutdown.
+- CSV and JSON exports, toolbar/context shortcuts, and confirmation flows for adding, removing, and ignoring targets.
+- Dedicated ignore manager with search, open/unignore actions, and import/export for lists you share with others.
+- Guided onboarding plus an in-app documentation browser with navigation, search, and data-folder helpers.
+- About dialog reads https://skillerious.github.io/Version-Tracker/?format=code&app=target-tracker to compare versions, surface release notes, and link to updates.
 
 ---
 
-## 🖼️ Screenshots
+## Screenshots
 <div align="center">
-  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/Screenshot-2025-10-11-132910.png" alt="Main window" width="49%">
-  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/Screenshot-2025-10-11-132930.png" alt="Targets table" width="49%"><br><br>
-  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/Screenshot-2025-10-11-133232.png" alt="Settings dialog" width="49%">
-  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/Screenshot-2025-10-11-193911.png" alt="Popover & status" width="49%">
+  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/TargetTracker/Screenshot-2025-10-21-193013.png" alt="Target Tracker main interface" width="90%"><br><br>
+  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/TargetTracker/Screenshot-2025-10-21-193026.png" alt="Settings dialog tabs" width="45%">
+  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/TargetTracker/Screenshot-2025-10-21-193337.png" alt="Ignore manager dialog" width="45%"><br><br>
+  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/TargetTracker/Screenshot-2025-10-21-193319.png" alt="Built-in help and documentation" width="45%">
+  <img src="https://raw.githubusercontent.com/Skillerious87/SwiftImageHost/main/images/TargetTracker/Screenshot-2025-10-21-193751.png" alt="About dialog with update status" width="45%">
 </div>
 
 ---
 
-## 🧩 Features in detail
-- **In-app onboarding** — paste your API key, choose/create your targets file, and **add targets immediately** (paste or import).
-- **Targets from file** — point the app at your `target.json` file (a list of Torn user IDs) and it’ll track them automatically.
-- **Configurable concurrency** — choose how many parallel requests you want to run (default is safe and conservative).
-- **Hands-off refresh cadence** — every batch schedules the next pull 65 s later (or your custom interval).
-- **Local cache** — keeps recent results on disk so restarts are instant and API-friendly.
-- **Ignore list** — place player IDs in `ignore.json` to exclude them from checks.
-- **Inline help** — open the Documentation dialog from the Help menu for a full walkthrough.
-- **Safe by design** — built-in rate-limiter to play nicely with Torn API limits.
+## Feature tour
+
+**Main workspace**
+- Sortable columns for name, ID, level, status, details, hospital/jail until, faction, last action, and errors.
+- Toolbar and context menu for refresh, export CSV/JSON, copy IDs, open profile or attack URLs, ignore/unignore, and remove.
+- Search scopes (All, Name, ID, Faction) with regex and case toggles plus level and status filters that update instantly.
+
+**Status bar**
+- Glass pills show totals, visible counts, ignored totals, cached hits, and error counts.
+- Progress meter and auto-refresh countdown change color based on success or fetch issues.
+- Connectivity probes pause timers when offline and resume scheduling once the network returns.
+
+**Managing targets**
+- Add Targets dialog accepts IDs, comma or space lists, and Torn profile URLs, previewing parsed results before saving.
+- Remove Targets dialog summarizes affected rows and warns that the action cannot be undone.
+- Ignore dialog includes search, open profile, unignore, and import/export of ignore lists.
+
+**Documentation and onboarding**
+- First-run onboarding covers API keys, storage, input formats, and safe pacing.
+- Documentation dialog offers tabbed sections, table-of-contents navigation, search, jump-to combo, and quick data-folder actions.
+
+**Updates and diagnostics**
+- About dialog compares local vs remote version, surfaces the latest release notes, and links to GitHub releases.
+- Logging channels (TargetTracker.*) keep diagnosis output tidy without cluttering the UI.
 
 ---
 
-## 🚀 Getting started
+## Getting started
 
-### 1) Requirements
-- **Python 3.10+** (3.11 recommended)
-- A Torn.com **API key** with sufficient read access (see below)
-- Windows, macOS or Linux
+### Requirements
+- Python 3.10 or newer (3.11+ recommended).
+- Torn.com API key with Limited Access scope.
+- Windows, macOS, or Linux with a desktop environment.
 
-### 2) Clone and install
+### Installation
 ```bash
 git clone https://github.com/skillerious/TornTargetTracker.git
 cd TornTargetTracker
 python -m venv venv
+```
+
+Activate the virtual environment:
+```bash
 # Windows
 venv\Scripts\activate
-# macOS / Linux
-# source venv/bin/activate
 
+# macOS / Linux
+source venv/bin/activate
+```
+
+Install dependencies:
+```bash
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3) First run
+### First run
 ```bash
 python main.py
 ```
-On first launch, the onboarding will guide you to:
-1. **Paste your Torn API key**  
-2. **Choose or create** your targets file (e.g. `%APPDATA%\TargetTracker\target.json` on Windows)  
-3. **Add targets now** — paste one **Torn user ID per line**, or paste **profile URLs / comma‑separated IDs** (the app extracts IDs for you).  
-4. Optionally tweak **concurrency**, **auto‑refresh**, and **cache** preferences.
-
-You can revisit all of this later via **Settings** and the **Add Targets** dialog.
+The onboarding flow helps you:
+1. Paste or create a Limited Access Torn API key (stored locally only).
+2. Choose or create `target.json` (default lives in `%APPDATA%\TargetTracker` on Windows).
+3. Paste IDs, comma-separated lists, or profile URLs to populate your first target list.
+4. Pick concurrency, auto-refresh cadence, and caching defaults; adjust any time in Settings.
 
 ---
 
-## ➕ Adding targets
-You can add targets during onboarding or anytime from the toolbar/menu.
+## Managing data
 
-**Input formats supported:**
-- Plain numeric IDs, **one per line**:  
-  ```
-  3212954
-  1234567
-  7654321
-  ```
-- Comma/space‑separated lists: `3212954, 1234567 7654321`
-- Torn profile URLs: the app automatically extracts the `XID`.
+- `target.json` stores the Torn user IDs you monitor (JSON array of integers).
+- `ignore.json` tracks IDs you want to skip; the UI keeps the table in sync.
+- Cached API responses live in your app data folder so warm starts are instant when caching is enabled.
+- Settings dialog provides buttons to open the app data folder, clear caches, and create a fresh targets file.
 
-**Where they’re stored:** your user config directory as `target.json`. The app will create/update this file for you.
-
-**Ignoring players:** add numeric IDs to an `ignore.json` file in the same directory; those will be skipped during refreshes.
-
----
-
-## 🔑 About the Torn API key
-Target Tracker uses **your personal API key** to read player data you are allowed to access.  
-- You can generate/manage keys from your **Torn account settings → API Keys**.  
-- Choose an access level that covers the data you want to see (public info is sufficient for level/status/last action).  
-- You can revoke the key at any time from Torn.
-
-> **Security note:** Your key is stored **locally on your machine** inside your user configuration folder. Do not share the file or commit it to Git.
-
----
-
-## 🗂️ Managing your targets (file view)
-
-Target file format (JSON array of Torn user IDs):
-```json
-[3212954, 1234567, 7654321]
+**Supported input formats**
+```
+3212954
+3212954, 1234567, 7654321
+https://www.torn.com/profiles.php?XID=3212954
 ```
 
-- Default file name: `target.json`  
-- Optional ignore file: `ignore.json` (same directory), example:
-  ```json
-  [1111111, 2222222]
-  ```
-
-> Tip: Keep your target list in a repo or cloud drive if you share it across devices, but **never** share your API key.
-
 ---
 
-## ⚙️ Settings overview
+## Settings at a glance
 
-| Setting | Description |
+| Tab | Highlights |
 | --- | --- |
-| **API key** | Personal Torn API key used for lookups. |
-| **Targets file** | Path to `target.json` with the IDs you want to monitor. |
-| **Add Targets** | Opens the in‑app editor to paste/import IDs (creates or updates `target.json`). |
-| **Concurrency** | How many parallel lookups to run (keep modest to respect rate limits). |
-| **Auto refresh** | Seconds between batches (defaults to 65 s if blank). |
-| **Load cache at start** | Re‑use cached results on launch for instant UI. |
+| General | Manage API key (show, paste, test), pick or create target file, decide if the main window starts maximized. |
+| Data & Cache | Jump to the app data folder, preload cache on startup, tune cache save cadence, clear cache safely. |
+| Performance | Sliders for concurrency, auto-refresh interval, rate cap per minute, and minimum interval; includes a Torn-safe preset. |
+| Retries & Backoff | Configure retry count, backoff base and ceiling, and whether to honor Retry-After headers; preview shows effective timings. |
+| Help | Handy links to API docs, release notes, GitHub issues, Discord, and data-folder actions. |
 
-All settings are stored in your user config directory (e.g., `%APPDATA%\TargetTracker\`). You can re‑open the **Settings** dialog anytime from the toolbar.
-
----
-
-## 🧱 Tech stack
-- **Python + PyQt6** desktop app
-- **Requests + workers** with a **rate‑limiter**
-- Modular code: `api.py`, `controllers.py`, `models.py`, `views.py`, `workers.py`, `storage.py`, `settings_dialog.py`
+Apply commits changes immediately and the controller updates running workers where possible.
 
 ---
 
-## 🐞 Troubleshooting
-- `ModuleNotFoundError: No module named 'PyQt6'` → run `pip install -r requirements.txt` (or `pip install PyQt6`).
-- API calls failing or slow → lower **Concurrency** and/or increase the **Auto refresh** interval to stay within limits.
-- Empty table → add targets via onboarding or **Add Targets** dialog; ensure the IDs are numeric.
-- Wrong or expired key → open **Settings**, paste a fresh API key, use **Test key**, and save.
-- Need a refresher? → Help → **Open Documentation** launches the built-in walkthrough.
+## Built-in help and tooling
+- Help -> Documentation opens a full guide covering setup, workflows, troubleshooting, and shortcuts.
+- Help -> Copy Diagnostics copies version, Python, PyQt, rate limiter, and path info for support requests.
+- Status bar icon tooltips surface last update time, error counts, and quick hints.
 
 ---
 
-## 🧭 Project layout
-A quick map of key files you’ll touch:
-- `main.py` – app entry point
-- `controllers.py` – UI controller & app logic
-- `views.py` – widgets / view components
-- `api.py` – Torn API helpers
-- `workers.py` – background fetch tasks
-- `rate_limiter.py` – polite API throttling
-- `storage.py` – settings, cache & file paths
-- `settings_dialog.py` – preferences UI
-- `target.json` / `ignore.json` – your data files (in your user config directory)
+## Tech stack
+- Python + PyQt6 widgets (`views.py`, `search_bar.py`, `statusbar.py`).
+- Worker pool built on `QThreadPool` for concurrent Torn API calls.
+- `rate_limiter.py` implements a token bucket with cooldown penalties.
+- `storage.py` manages app data paths, settings, cache serialization, and ignore lists.
 
 ---
 
-## 🤝 Contributing
-PRs and ideas are welcome! Please keep PRs focused and include screenshots for UI changes.
+## Project layout
+- `main.py` - application bootstrap and controller wiring.
+- `controllers.py` - main window, menus, and actions.
+- `views.py` - table model, main view, about, ignore, add/remove dialogs.
+- `api.py` - Torn API client with retry/backoff logic.
+- `workers.py` - background fetch orchestration.
+- `settings_dialog.py` - tabbed preferences UI with API testing.
+- `documentation.py` - in-app help browser.
+- `storage.py` - settings, cache, and path helpers.
+- `rate_limiter.py` - global throttling primitives.
 
 ---
 
-## ⚖️ License
-MIT — see [LICENSE](LICENSE).
+## Contributing
+Bug reports, feature suggestions, and pull requests are welcome. Include screenshots or clips for UI tweaks to speed up review.
 
 ---
 
-## 🙏 Acknowledgements & Disclaimer
-- Built by the community for the community — thanks to everyone who contributes ideas and fixes.
-- **Not affiliated with Torn.com**. Be mindful of their API terms and rate limits.
-- All in‑game names and assets belong to their respective owners.
+## License
+Released under the MIT License. See [LICENSE](LICENSE).
+
+---
+
+## Disclaimer
+- Target Tracker is an unofficial community tool. Use it responsibly and follow Torn.com's API terms.
+- The application only makes read-only requests with the API key you supply. Keys and cached data never leave your machine.
+- Torn.com, Torn, and related assets remain the property of their respective owners.

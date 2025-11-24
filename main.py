@@ -5,6 +5,7 @@ import os
 import logging
 import threading
 import socket
+import faulthandler
 from typing import List, Set, Callable, Optional, Dict
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, QUrl
@@ -16,7 +17,7 @@ from models import TargetInfo
 from storage import (
     load_settings, save_settings, load_ignore, save_ignore,
     load_targets_from_file, load_cache, save_cache, add_targets_to_file,
-    remove_targets_from_file
+    remove_targets_from_file, get_appdata_dir
 )
 from api import TornAPI
 from workers import BatchFetcher
@@ -24,6 +25,8 @@ from views import MainView, IgnoreDialog, AboutDialog, AddTargetsDialog
 # NOTE: do NOT import SettingsDialog here; we hot-reload it in show_settings()
 from rate_limiter import RateLimiter
 from controllers import MainWindow, apply_darkstyle, ensure_first_run_targets
+from config import CONFIG
+from logging_config import setup_logging
 
 # Optional onboarding (no-op if missing)
 try:
@@ -56,10 +59,11 @@ class Controller(QObject):
         self.settings = load_settings()
         self.ignored: Set[int] = load_ignore()
 
-        # In-memory rows & indices
+        # In-memory rows & indices (thread-safe with lock)
         self.rows: List[TargetInfo] = []
         self._rows_by_id: Dict[int, int] = {}
         self._cache_map: Optional[Dict[int, TargetInfo]] = None
+        self._rows_lock = threading.Lock()  # Protect rows and _rows_by_id from race conditions
 
         # Prevent updates for removed IDs mid-flight
         self._current_target_set: Set[int] = set()
@@ -70,6 +74,7 @@ class Controller(QObject):
         self._set_meta: Optional[Callable[[str], None]] = None
         self._set_auto_eta: Optional[Callable[[Optional[int]], None]] = None
         self._auto_eta_state: Optional[int] = -1
+        self._settings_dialog_module = None
 
         # Auto-refresh
         self._auto_timer = QTimer(self)
@@ -82,8 +87,11 @@ class Controller(QObject):
         self._fetcher: Optional[BatchFetcher] = None
         self._errors = 0
         self._done = 0
-        self._save_every = int(self.settings.get("save_cache_every", 20))
+        self._save_every = int(self.settings.get("save_cache_every", CONFIG.CACHE_SAVE_EVERY_N))
         self._since_last_save = 0
+
+        # Cache expiration timestamp (hours)
+        self._cache_expiry_hours = CONFIG.CACHE_EXPIRY_HOURS
 
         # Global shutdown flag for all workers/backoff waits
         self._shutdown_event = threading.Event()
@@ -168,6 +176,10 @@ class Controller(QObject):
         if not self.rows:
             return 0
         return sum(1 for r in self.rows if r.user_id not in self.ignored)
+
+    # Future enhancement: Cache expiration
+    # TODO: Add timestamp field to TargetInfo to track cache age
+    # TODO: Filter expired entries when loading cache
 
     # ---------------- Targets & API ----------------
 
@@ -410,16 +422,26 @@ class Controller(QObject):
         logger.info("BatchFetcher started: concurrency=%d", conc)
 
         def update_row_internal(info: TargetInfo):
+            """Thread-safe row update."""
             if info.user_id not in self._current_target_set:
                 return
-            idx = self._rows_by_id.get(info.user_id, None)
-            if idx is None:
-                self._rows_by_id[info.user_id] = len(self.rows)
-                self.rows.append(info)
-            else:
-                self.rows[idx] = info
-            if self._cache_map is not None:
-                self._cache_map[info.user_id] = info
+
+            with self._rows_lock:
+                idx = self._rows_by_id.get(info.user_id, None)
+                if idx is None:
+                    self._rows_by_id[info.user_id] = len(self.rows)
+                    self.rows.append(info)
+                else:
+                    # Ensure index is still valid (defensive)
+                    if 0 <= idx < len(self.rows):
+                        self.rows[idx] = info
+                    else:
+                        logger.warning("Row index out of sync for user %s, rebuilding", info.user_id)
+                        self._rows_by_id[info.user_id] = len(self.rows)
+                        self.rows.append(info)
+
+                if self._cache_map is not None:
+                    self._cache_map[info.user_id] = info
 
         def on_one(info: TargetInfo):
             if info.error:
@@ -504,10 +526,13 @@ class Controller(QObject):
     # ---------------- Dialogs ----------------
 
     def show_settings(self):
-        import importlib, settings_dialog
-        importlib.reload(settings_dialog)  # dev-only
-        print("SettingsDialog from:", settings_dialog.__file__)
-        SettingsDialog = settings_dialog.SettingsDialog
+        import importlib
+
+        if self._settings_dialog_module is None:
+            self._settings_dialog_module = importlib.import_module("settings_dialog")
+        SettingsDialog = self._settings_dialog_module.SettingsDialog
+        module_file = getattr(self._settings_dialog_module, "__file__", "<unknown>")
+        print("SettingsDialog from:", module_file)
 
         dlg = SettingsDialog(self.settings, self.view)
         new_st = {}
@@ -590,11 +615,14 @@ class Controller(QObject):
             return
 
         new_only = [i for i in ids if i not in self._rows_by_id]
-        for uid in new_only:
-            self._rows_by_id[uid] = len(self.rows)
-            ti = TargetInfo(user_id=uid)
-            self.rows.append(ti)
-            self.view.update_or_insert(ti)
+
+        # Thread-safe row addition
+        with self._rows_lock:
+            for uid in new_only:
+                self._rows_by_id[uid] = len(self.rows)
+                ti = TargetInfo(user_id=uid)
+                self.rows.append(ti)
+                self.view.update_or_insert(ti)
 
         self._current_target_set.update(ids)
 
@@ -613,8 +641,12 @@ class Controller(QObject):
             return
 
         to_remove = set(ids)
-        self.rows = [r for r in self.rows if r.user_id not in to_remove]
-        self._rows_by_id = {r.user_id: i for i, r in enumerate(self.rows)}
+
+        # Thread-safe row removal
+        with self._rows_lock:
+            self.rows = [r for r in self.rows if r.user_id not in to_remove]
+            self._rows_by_id = {r.user_id: i for i, r in enumerate(self.rows)}
+
         self.view.set_rows(self.rows)
         self._current_target_set.difference_update(to_remove)
         self._update_meta(self._done, len(self.rows))
@@ -705,55 +737,99 @@ class Controller(QObject):
 
 # ---------------- main ----------------
 def main():
+    """Application entry point with proper resource management."""
+    # Setup logging first (before any other operations)
+    setup_logging(log_level="INFO", console=True)
+
     # Qt6 HiDPI is fine by default; slight nudge:
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
 
-    app = QApplication([])
-    app.setApplicationName("Target Tracker")
+    # Setup crash diagnostics with proper resource cleanup
+    crash_path = os.path.join(get_appdata_dir(), CONFIG.CRASH_LOG_FILE)
+    crash_log_handle = None
 
-    dark_qss = apply_darkstyle(app)
-
-    # ensure AppData folder & first-run targets.json
-    ensure_first_run_targets()
-
-    # single window only
-    win = MainWindow()
-    if dark_qss:
-        win.setStyleSheet(dark_qss)
-
-    # Construct controller and attach (avoids circular imports)
-    controller = Controller(win.view)
-    win.attach_controller(controller)
-
-    # ensure controller shuts down on app quit
-    app.aboutToQuit.connect(controller.shutdown)
-
-    # Robust "start maximized" while still remembering size/pos in settings
     try:
-        st = load_settings()
-        last_size = st.get("last_size")
-        last_pos = st.get("last_pos")
-        start_max = bool(st.get("start_maximized", True))  # default: maximize
+        # Open crash log file
+        crash_log_handle = open(crash_path, "w", encoding="utf-8")
+        faulthandler.enable(crash_log_handle)
+        logger.info("Crash diagnostics enabled: %s", crash_path)
+    except Exception as exc:
+        logger.warning("Crash diagnostics file setup failed: %s", exc)
+        # Fallback to stderr
+        try:
+            faulthandler.enable()
+            logger.debug("Faulthandler enabled to stderr")
+        except Exception as fallback_exc:
+            logger.debug("Faulthandler fallback failed: %s", fallback_exc)
 
-        if start_max:
-            win.showMaximized()
-        else:
-            if isinstance(last_size, list) and len(last_size) == 2:
-                w, h = int(last_size[0]), int(last_size[1])
-                if w > 300 and h > 200:
+    exit_code = 1  # Default exit code in case of early failure
+
+    try:
+        app = QApplication([])
+        app.setApplicationName(CONFIG.APP_NAME)
+        app.setApplicationVersion(CONFIG.APP_VERSION)
+
+        dark_qss = apply_darkstyle(app)
+
+        # ensure AppData folder & first-run targets.json
+        ensure_first_run_targets()
+
+        # single window only
+        win = MainWindow()
+        if dark_qss:
+            win.setStyleSheet(dark_qss)
+
+        # Construct controller and attach (avoids circular imports)
+        controller = Controller(win.view)
+        win.attach_controller(controller)
+
+        # ensure controller shuts down on app quit
+        app.aboutToQuit.connect(controller.shutdown)
+
+        # Robust "start maximized" while still remembering size/pos in settings
+        try:
+            st = load_settings()
+            last_size = st.get("last_size")
+            last_pos = st.get("last_pos")
+            start_max = bool(st.get("start_maximized", True))  # default: maximize
+
+            if start_max:
+                win.showMaximized()
+            else:
+                if isinstance(last_size, list) and len(last_size) == 2:
+                    w, h = max(CONFIG.MIN_WINDOW_WIDTH, int(last_size[0])), max(CONFIG.MIN_WINDOW_HEIGHT, int(last_size[1]))
                     win.resize(w, h)
-            if isinstance(last_pos, list) and len(last_pos) == 2:
-                x, y = int(last_pos[0]), int(last_pos[1])
-                win.move(x, y)
-            win.show()
-    except Exception:
-        win.showMaximized()
+                if isinstance(last_pos, list) and len(last_pos) == 2:
+                    x, y = int(last_pos[0]), int(last_pos[1])
+                    win.move(x, y)
+                win.show()
+        except Exception as e:
+            logger.warning("Failed to restore window state: %s", e)
+            win.showMaximized()
 
-    # Show onboarding after the window is up (first run / missing API key)
-    QTimer.singleShot(0, lambda: maybe_show_onboarding(win))
+        # Show onboarding after the window is up (first run / missing API key)
+        QTimer.singleShot(0, lambda: maybe_show_onboarding(win))
 
-    # Run the app
-    raise SystemExit(app.exec())
+        # Run the app
+        logger.info("%s v%s starting", CONFIG.APP_NAME, CONFIG.APP_VERSION)
+        exit_code = app.exec()
+        logger.info("Application exiting with code %d", exit_code)
+
+    except Exception as e:
+        logger.exception("Fatal error during application startup: %s", e)
+        exit_code = 1
+
+    finally:
+        # Clean up crash log file handle
+        if crash_log_handle:
+            try:
+                faulthandler.disable()
+                crash_log_handle.close()
+                logger.debug("Crash log closed cleanly")
+            except Exception as e:
+                logger.debug("Error closing crash log: %s", e)
+
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

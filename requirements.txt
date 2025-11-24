@@ -1,3 +1,4 @@
 PyQt6>=6.7
 qdarkstyle>=3.2
 requests>=2.32
+cryptography>=41.0.0

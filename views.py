@@ -22,7 +22,9 @@ except Exception:  # packaging optional
 from search_bar import SearchBar
 
 
-import requests
+import urllib.request
+import urllib.error
+from urllib.parse import parse_qs, urljoin, urlparse
 
 
 from PyQt6.QtCore import (
@@ -34,6 +36,7 @@ from PyQt6.QtCore import (
     QSortFilterProxyModel,
     pyqtSignal,
     QUrl,
+    QRectF,
     QSize,
     QTimer,
     QItemSelectionModel,
@@ -50,6 +53,7 @@ from PyQt6.QtGui import (
     QPen,
     QBrush,
     QColor,
+    QPaintEvent,
 )
 
 from PyQt6.QtWidgets import (
@@ -302,18 +306,27 @@ def asset_path(rel: str) -> str:
     return cand if os.path.exists(cand) else rel
 
 
+_ICON_FALLBACKS = {
+    "ignore": ("block",),
+    "ignore-red": ("block-red",),
+    "unignore": ("unblock",),
+}
+
+
 def _icon_path(name: str) -> Optional[str]:
 
-    for p in (
-        asset_path(os.path.join("assets", f"ic-{name}.svg")),
-        asset_path(os.path.join("assets", f"ic-{name}.png")),
-        asset_path(f"ic-{name}.svg"),
-        asset_path(f"ic-{name}.png"),
-    ):
+    for key in (name, *_ICON_FALLBACKS.get(name, ())):
 
-        if os.path.exists(p):
+        for p in (
+            asset_path(os.path.join("assets", f"ic-{key}.svg")),
+            asset_path(os.path.join("assets", f"ic-{key}.png")),
+            asset_path(f"ic-{key}.svg"),
+            asset_path(f"ic-{key}.png"),
+        ):
 
-            return p
+            if os.path.exists(p):
+
+                return p
 
     return None
 
@@ -765,8 +778,6 @@ class TargetsModel(QAbstractTableModel):
                 tip.append("<b>Ignored:</b> Yes")
 
             return "<br>".join(tip)
-
-        return QVariant()
 
         return QVariant()
 
@@ -1624,7 +1635,7 @@ class IgnoreDialog(QDialog):
 
         self._update_count()
 
-    def _selected_ids(self) -> List[int]:
+    def _dialog_selected_ids(self) -> List[int]:
 
         ids: List[int] = []
 
@@ -1642,7 +1653,7 @@ class IgnoreDialog(QDialog):
 
     def _open_profile_selected(self):
 
-        ids = self._selected_ids()
+        ids = self._dialog_selected_ids()
 
         if not ids:
 
@@ -1652,7 +1663,7 @@ class IgnoreDialog(QDialog):
 
     def _unignore_selected(self):
 
-        for uid in self._selected_ids():
+        for uid in self._dialog_selected_ids():
 
             self.ignored.discard(uid)
 
@@ -1805,6 +1816,216 @@ class IgnoreDialog(QDialog):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
 
+class RemoveTargetsDialog(QDialog):
+    def __init__(self, targets: List[TargetInfo], parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Remove Targets")
+        self.setObjectName("RemoveTargetsDialog")
+        self.setModal(True)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(430)
+
+        count = len(targets)
+        label_text = "target" if count == 1 else "targets"
+        pix = icon("delete").pixmap(40, 40)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 26, 28, 24)
+        outer.setSpacing(18)
+
+        header = QHBoxLayout()
+        header.setSpacing(16)
+
+        icon_lbl = QLabel()
+        if not pix.isNull():
+            icon_lbl.setPixmap(pix)
+        icon_lbl.setFixedSize(40, 40)
+        icon_lbl.setScaledContents(True)
+        icon_lbl.setObjectName("RemoveTargetsIcon")
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+
+        title = QLabel("Remove Selected Targets")
+        title.setObjectName("RemoveTargetsTitle")
+
+        subtitle = QLabel(
+            f"You are about to remove {count} {label_text} from the tracker."
+        )
+        subtitle.setObjectName("RemoveTargetsSubtitle")
+        subtitle.setWordWrap(True)
+
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+
+        header.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+        header.addLayout(title_box)
+        header.addStretch(1)
+
+        outer.addLayout(header)
+
+        card = QFrame()
+        card.setObjectName("RemoveTargetsCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(8)
+
+        summary = QLabel("TARGETS TO REMOVE")
+        summary.setObjectName("RemoveTargetsSummary")
+        card_layout.addWidget(summary)
+
+        display_targets = targets[:5]
+        list_items: List[str] = []
+        for tgt in display_targets:
+            base_name = (tgt.name or "").strip()
+            if not base_name:
+                uid_val = getattr(tgt, "user_id", "")
+                base_name = str(uid_val) if uid_val is not None else "Unknown"
+            safe_name = html.escape(base_name)
+            uid = getattr(tgt, "user_id", None)
+            uid_text = f"[{uid}]" if isinstance(uid, int) else ""
+            list_items.append(
+                f"<li>{safe_name} <span class='uid'>{uid_text}</span></li>"
+            )
+
+        extra = count - len(display_targets)
+        if extra > 0:
+            more_label = "target" if extra == 1 else "targets"
+            list_items.append(f"<li>...and {extra} more {more_label}.</li>")
+
+        if not list_items:
+            list_items.append("<li>No targets selected.</li>")
+
+        names = QLabel(f"<ul>{''.join(list_items)}</ul>")
+        names.setObjectName("RemoveTargetsList")
+        names.setTextFormat(Qt.TextFormat.RichText)
+        names.setWordWrap(True)
+        card_layout.addWidget(names)
+
+        hint = QLabel(
+            "Removing a target clears it from the current table. You can add it again later."
+        )
+        hint.setObjectName("RemoveTargetsHint")
+        hint.setWordWrap(True)
+        card_layout.addWidget(hint)
+
+        outer.addWidget(card)
+
+        footer = QLabel("This action cannot be undone.")
+        footer.setObjectName("RemoveTargetsFooter")
+        footer.setWordWrap(True)
+        outer.addWidget(footer)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        buttons.addStretch(1)
+
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setObjectName("RemoveTargetsCancel")
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        action_caption = "Remove Target" if count == 1 else f"Remove {count} Targets"
+        self.btn_remove = QPushButton(action_caption)
+        self.btn_remove.setObjectName("RemoveTargetsPrimary")
+        self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_remove.setDefault(True)
+        self.btn_remove.setAutoDefault(True)
+
+        buttons.addWidget(self.btn_cancel)
+        buttons.addWidget(self.btn_remove)
+
+        outer.addLayout(buttons)
+
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QDialog#RemoveTargetsDialog {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(26, 32, 48, 0.97),
+                    stop:1 rgba(14, 18, 30, 0.97));
+                border: 1px solid rgba(74, 96, 140, 0.55);
+                border-radius: 14px;
+            }
+            QLabel#RemoveTargetsTitle,
+            QLabel#RemoveTargetsSubtitle,
+            QLabel#RemoveTargetsSummary,
+            QLabel#RemoveTargetsList,
+            QLabel#RemoveTargetsHint,
+            QLabel#RemoveTargetsFooter {
+                background: transparent;
+            }
+            QLabel#RemoveTargetsTitle {
+                color: #f0f3ff;
+                font-size: 18px;
+                font-weight: 600;
+            }
+            QLabel#RemoveTargetsSubtitle {
+                color: rgba(210, 220, 244, 0.92);
+                font-size: 13px;
+            }
+            QLabel#RemoveTargetsSummary {
+                color: rgba(200, 212, 238, 0.72);
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QLabel#RemoveTargetsList {
+                color: rgba(236, 240, 255, 0.96);
+                font-size: 13px;
+            }
+            QLabel#RemoveTargetsList ul {
+                margin: 0 0 0 18px;
+            }
+            QLabel#RemoveTargetsList .uid {
+                color: rgba(164, 186, 220, 0.75);
+            }
+            QLabel#RemoveTargetsHint, QLabel#RemoveTargetsFooter {
+                color: rgba(190, 202, 228, 0.7);
+                font-size: 12px;
+            }
+            QFrame#RemoveTargetsCard {
+                background: transparent;
+                border: 1px solid rgba(92, 114, 158, 0.4);
+                border-radius: 10px;
+            }
+            QPushButton#RemoveTargetsPrimary {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(112, 205, 255, 255),
+                    stop:1 rgba(74, 156, 255, 255));
+                color: #061220;
+                border: none;
+                padding: 9px 24px;
+                border-radius: 10px;
+                font-weight: 600;
+            }
+            QPushButton#RemoveTargetsPrimary:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(132, 216, 255, 255),
+                    stop:1 rgba(94, 168, 255, 255));
+            }
+            QPushButton#RemoveTargetsPrimary:pressed {
+                background: rgba(74, 156, 255, 0.82);
+            }
+            QPushButton#RemoveTargetsCancel {
+                background: rgba(255, 255, 255, 0.01);
+                border: 1px solid rgba(102, 126, 164, 0.45);
+                padding: 8px 20px;
+                border-radius: 10px;
+                color: rgba(220, 228, 248, 0.88);
+                font-weight: 600;
+            }
+            QPushButton#RemoveTargetsCancel:hover {
+                border-color: rgba(128, 150, 188, 0.6);
+                background: rgba(255, 255, 255, 0.03);
+            }
+            QPushButton#RemoveTargetsCancel:pressed {
+                background: rgba(102, 126, 164, 0.16);
+            }
+        """)
+
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_remove.clicked.connect(self.accept)
+
+
 class IgnoredPromptDialog(QDialog):
     def __init__(self, name: str, parent=None, open_what: str = "profile"):
         super().__init__(parent)
@@ -1813,17 +2034,18 @@ class IgnoredPromptDialog(QDialog):
         self.setObjectName("IgnoredPromptDialog")
         self.setModal(True)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
 
         safe_name = html.escape(name or "Unknown target")
-        action_text = "open the attack window" if open_what == "attack" else "open the profile"
-        accent_color = "#ff8ba0" if open_what == "attack" else "#5fd8ff"
+        action_text = (
+            "open the attack window" if open_what == "attack" else "open the profile"
+        )
         icon_name = "attack" if open_what == "attack" else "profile"
         pix = icon(icon_name).pixmap(42, 42)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(28, 26, 28, 24)
-        outer.setSpacing(18)
+        outer.setContentsMargins(30, 26, 30, 24)
+        outer.setSpacing(20)
 
         header = QHBoxLayout()
         header.setSpacing(16)
@@ -1836,52 +2058,66 @@ class IgnoredPromptDialog(QDialog):
         icon_lbl.setObjectName("IgnoredIcon")
 
         title_box = QVBoxLayout()
-        title_box.setSpacing(6)
+        title_box.setSpacing(4)
 
-        headline = QLabel("Ignored Target")
-        headline.setObjectName("IgnoredHeadline")
+        title = QLabel("Target Is Ignored")
+        title.setObjectName("IgnoredTitle")
 
-        chip = QLabel("IGNORED")
-        chip.setObjectName("IgnoredChip")
-        chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle = QLabel(
+            f"{safe_name} is currently hidden because they are on your ignore list."
+        )
+        subtitle.setObjectName("IgnoredSubtitle")
+        subtitle.setWordWrap(True)
+        subtitle.setTextFormat(Qt.TextFormat.RichText)
 
-        title_box.addWidget(headline)
-        title_box.addWidget(chip, alignment=Qt.AlignmentFlag.AlignLeft)
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+
+        tag = QLabel("IGNORED")
+        tag.setObjectName("IgnoredTag")
+        tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         header.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
-        header.addLayout(title_box)
-        header.addStretch(1)
+        header.addLayout(title_box, stretch=1)
+        header.addWidget(tag, 0, Qt.AlignmentFlag.AlignTop)
 
         outer.addLayout(header)
 
-        message = QLabel(
-            f"<span class='target-name'>{safe_name}</span> is currently "
-            f"<span class='target-state'>ignored</span>."
-        )
-        message.setObjectName("IgnoredMessage")
-        message.setWordWrap(True)
-        message.setTextFormat(Qt.TextFormat.RichText)
+        card = QFrame()
+        card.setObjectName("IgnoredCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(10)
 
-        hint = QLabel("Unignore them to resume tracking, or open just this once without changing your ignore list.")
+        detail = QLabel(
+            f"<span class='target-name'>{safe_name}</span> will stay filtered out until you remove them from your ignore list."
+        )
+        detail.setObjectName("IgnoredDetail")
+        detail.setWordWrap(True)
+        detail.setTextFormat(Qt.TextFormat.RichText)
+
+        options = QLabel(
+            "<ul>"
+            f"<li><b>Unignore</b> and {action_text}.</li>"
+            "<li>Open one time without changing the ignore list.</li>"
+            "</ul>"
+        )
+        options.setObjectName("IgnoredOptions")
+        options.setWordWrap(True)
+        options.setTextFormat(Qt.TextFormat.RichText)
+
+        card_layout.addWidget(detail)
+        card_layout.addWidget(options)
+
+        outer.addWidget(card)
+
+        hint = QLabel(
+            "Unignoring moves the target back into the main tracker. Opening once keeps them ignored."
+        )
         hint.setObjectName("IgnoredHint")
         hint.setWordWrap(True)
 
-        outer.addWidget(message)
         outer.addWidget(hint)
-
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Plain)
-        divider.setObjectName("IgnoredDivider")
-        outer.addWidget(divider)
-
-        action_tip = QLabel(
-            f"<span style='color:{accent_color};font-weight:600;'>Action:</span> "
-            f"Unignore and {action_text}, or open without changing your ignore list."
-        )
-        action_tip.setObjectName("IgnoredActionTip")
-        action_tip.setWordWrap(True)
-        outer.addWidget(action_tip)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(12)
@@ -1908,95 +2144,101 @@ class IgnoredPromptDialog(QDialog):
         outer.addLayout(buttons)
 
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet("""
-            QDialog#IgnoredPromptDialog {
+        self.setStyleSheet(f"""
+            QDialog#IgnoredPromptDialog {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(36, 39, 62, 240),
-                    stop:1 rgba(20, 24, 40, 246));
-                border: 1px solid rgba(150, 130, 255, 0.35);
-                border-radius: 14px;
-            }
-            QLabel#IgnoredHeadline {
+                    stop:0 rgba(24, 30, 46, 0.97),
+                    stop:1 rgba(12, 16, 26, 0.97));
+                border: 1px solid rgba(72, 94, 140, 0.55);
+                border-radius: 16px;
+            }}
+            QLabel#IgnoredTitle,
+            QLabel#IgnoredSubtitle,
+            QLabel#IgnoredDetail,
+            QLabel#IgnoredOptions,
+            QLabel#IgnoredHint {{
+                background: transparent;
+            }}
+            QLabel#IgnoredTitle {{
                 color: #f7f9ff;
                 font-size: 18px;
                 font-weight: 600;
-                letter-spacing: 0.4px;
-            }
-            QLabel#IgnoredChip {
-                padding: 2px 12px;
-                border-radius: 11px;
+            }}
+            QLabel#IgnoredSubtitle {{
+                color: rgba(206, 216, 238, 0.9);
+                font-size: 13px;
+            }}
+            QLabel#IgnoredTag {{
+                padding: 4px 14px;
+                border-radius: 12px;
                 font-size: 11px;
                 font-weight: 600;
-                color: rgba(248, 214, 255, 0.95);
-                background: rgba(173, 120, 255, 0.18);
-                border: 1px solid rgba(189, 134, 255, 0.45);
-                text-transform: uppercase;
-                letter-spacing: 1px;
-            }
-            QLabel#IgnoredMessage, QLabel#IgnoredHint, QLabel#IgnoredActionTip {
+                color: rgba(220, 232, 255, 0.95);
+                border: 1px solid rgba(116, 150, 210, 0.55);
+                background: transparent;
+            }}
+            QFrame#IgnoredCard {{
+                background: transparent;
+                border: 1px solid rgba(96, 120, 168, 0.42);
+                border-radius: 12px;
+            }}
+            QLabel#IgnoredDetail, QLabel#IgnoredOptions, QLabel#IgnoredHint {{
                 color: rgba(232, 238, 255, 0.92);
                 font-size: 13px;
-                line-height: 1.55;
-                background: transparent;
-            }
-            QLabel#IgnoredMessage .target-name {
+            }}
+            QLabel#IgnoredDetail .target-name {{
                 color: #ffffff;
                 font-weight: 600;
-            }
-            QLabel#IgnoredMessage .target-state {
-                color: #ff8fb1;
-                font-weight: 600;
-            }
-            QFrame#IgnoredDivider {
-                background: rgba(255, 255, 255, 0.08);
-                height: 1px;
-            }
-            QPushButton#IgnoredPrimaryButton {
+            }}
+            QLabel#IgnoredOptions ul {{
+                margin: 6px 0 0 16px;
+            }}
+            QPushButton#IgnoredPrimaryButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(118, 231, 203, 255),
-                    stop:1 rgba(113, 149, 255, 255));
-                color: #0a1530;
+                    stop:0 rgba(118, 231, 228, 255),
+                    stop:1 rgba(113, 181, 255, 255));
+                color: #03121f;
                 border: none;
-                padding: 9px 22px;
+                padding: 9px 24px;
                 border-radius: 10px;
                 font-weight: 600;
-            }
-            QPushButton#IgnoredPrimaryButton:hover {
+            }}
+            QPushButton#IgnoredPrimaryButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(135, 240, 214, 255),
-                    stop:1 rgba(130, 165, 255, 255));
-            }
-            QPushButton#IgnoredPrimaryButton:pressed {
-                background: rgba(96, 138, 255, 0.85);
-            }
-            QPushButton#IgnoredSecondaryButton {
-                background: rgba(255, 255, 255, 0.05);
-                border: 1px solid rgba(150, 170, 255, 0.45);
+                    stop:0 rgba(142, 239, 232, 255),
+                    stop:1 rgba(136, 198, 255, 255));
+            }}
+            QPushButton#IgnoredPrimaryButton:pressed {{
+                background: rgba(92, 150, 255, 0.85);
+            }}
+            QPushButton#IgnoredSecondaryButton {{
+                background: rgba(255, 255, 255, 0.04);
+                border: 1px solid rgba(116, 140, 190, 0.5);
                 padding: 8px 20px;
                 border-radius: 10px;
-                color: rgba(228, 233, 255, 0.88);
+                color: rgba(224, 230, 248, 0.9);
                 font-weight: 600;
-            }
-            QPushButton#IgnoredSecondaryButton:hover {
-                border-color: rgba(177, 196, 255, 0.65);
-                background: rgba(255, 255, 255, 0.08);
-            }
-            QPushButton#IgnoredSecondaryButton:pressed {
-                background: rgba(140, 170, 255, 0.28);
-            }
-            QPushButton#IgnoredGhostButton {
+            }}
+            QPushButton#IgnoredSecondaryButton:hover {{
+                border-color: rgba(144, 172, 216, 0.7);
+                background: rgba(255, 255, 255, 0.06);
+            }}
+            QPushButton#IgnoredSecondaryButton:pressed {{
+                background: rgba(140, 170, 255, 0.22);
+            }}
+            QPushButton#IgnoredGhostButton {{
                 background: transparent;
                 border: none;
                 padding: 8px 12px;
                 color: rgba(208, 214, 238, 0.7);
                 font-weight: 500;
-            }
-            QPushButton#IgnoredGhostButton:hover {
+            }}
+            QPushButton#IgnoredGhostButton:hover {{
                 color: rgba(238, 243, 255, 0.86);
-            }
-            QPushButton#IgnoredGhostButton:pressed {
+            }}
+            QPushButton#IgnoredGhostButton:pressed {{
                 color: rgba(184, 192, 215, 0.86);
-            }
+            }}
         """)
 
         self.result_choice = "cancel"
@@ -2019,6 +2261,65 @@ class IgnoredPromptDialog(QDialog):
 # ======================================================================
 
 
+class _MiniSpinner(QWidget):
+    """Small, gradient spinner shown during update checks."""
+
+    def __init__(self, diameter: int = 14, color: QColor | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._angle = 0
+        self._diameter = diameter
+        self._pen_width = max(2, diameter // 6)
+        base_color = color or QColor(72, 187, 120)
+        self._color = QColor(base_color)
+        self._trail_color = QColor(base_color)
+        self._trail_color.setAlphaF(0.25)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._advance)
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setFixedSize(diameter, diameter)
+        self.hide()
+
+    def start(self) -> None:
+        if not self._timer.isActive():
+            self._timer.start()
+        self.show()
+
+    def stop(self) -> None:
+        if self._timer.isActive():
+            self._timer.stop()
+        self.hide()
+
+    def _advance(self) -> None:
+        self._angle = (self._angle + 30) % 360
+        self.update()
+
+    def paintEvent(self, _: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = QRectF(self.rect())
+        inset = self._pen_width / 2 + 1
+        rect.adjust(inset, inset, -inset, -inset)
+
+        trail_pen = QPen(self._trail_color, self._pen_width)
+        trail_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(trail_pen)
+        painter.drawArc(rect, 0, 360 * 16)
+
+        arc_pen = QPen(self._color, self._pen_width)
+        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc_pen)
+        painter.drawArc(rect, -self._angle * 16, -120 * 16)
+
+        painter.end()
+
+
 class AboutDialog(QDialog):
 
     """
@@ -2035,10 +2336,13 @@ class AboutDialog(QDialog):
         str
     )  # emitted from worker thread â- ' handled in UI thread
 
+    updateCheckFinished = pyqtSignal(bool)
+
     VERSION_ENDPOINTS = [
-        f"{VERSION_TRACKER_BASE}?format=json&app=target-tracker",
+        "http://127.0.0.1:5500/index.html?format=code&app=target-tracker",
+        f"{VERSION_TRACKER_BASE}?format=json&app={VERSION_APP_ID}",
         f"{VERSION_TRACKER_BASE}?format=json",
-        f"{VERSION_TRACKER_BASE}?format=code&app=target-tracker",
+        f"{VERSION_TRACKER_BASE}?format=code&app={VERSION_APP_ID}",
     ]
 
     RELEASES_URL = "https://github.com/skillerious/TornTargetTracker/releases"
@@ -2251,15 +2555,37 @@ class AboutDialog(QDialog):
 
             QWidget#pill {
 
-                background: transparent;               /* fully transparent interior */
-
-                border: 1px solid rgba(46,125,50,0.85);/* green outline */
+                background: transparent;
 
                 border-radius: 11px;
 
+                border: 1px solid rgba(46,125,50,0.85);
+
             }
 
-            QLabel#pillText { color:#d7ffe3; font-size:12px; background: transparent; }
+            QWidget#pill[variant="checking"] {
+
+                border: 1px solid rgba(102,142,200,0.65);
+
+            }
+
+            QWidget#pill[variant="latest"] {
+
+                border: 1px solid rgba(146,118,240,0.85);
+
+            }
+
+            QWidget#pill[variant="update"] {
+
+                border: 1px solid rgba(46,125,50,0.85);
+
+            }
+
+            QWidget#pill QLabel#pillText { color:#d7ffe3; font-size:12px; background: transparent; }
+
+            QWidget#pill[variant="checking"] QLabel#pillText { color:#d3e1f8; }
+
+            QWidget#pill[variant="latest"] QLabel#pillText { color:#e4d9ff; }
 
         """
         )
@@ -2358,25 +2684,6 @@ class AboutDialog(QDialog):
 
         # green pill (transparent interior) for updates
 
-        def _green_dot_pm(sz=14):
-
-            pm = QPixmap(sz, sz)
-            pm.fill(Qt.GlobalColor.transparent)
-
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-            color = QColor(72, 187, 120)
-
-            p.setBrush(QBrush(color))
-            p.setPen(QPen(color, 1))
-
-            r = sz - 2
-            p.drawEllipse(1, 1, r, r)
-            p.end()
-
-            return pm
-
         self.update_pill = QWidget()
 
         self.update_pill.setObjectName("pill")
@@ -2393,8 +2700,10 @@ class AboutDialog(QDialog):
 
         pill_l.setSpacing(6)
 
-        pill_icon = QLabel()
-        pill_icon.setPixmap(_green_dot_pm(14))
+        self._update_spinner = _MiniSpinner(14, QColor(72, 187, 120), self.update_pill)
+        self._pill_icon = QLabel()
+        self._pill_icon_color_key: Optional[str] = None
+        self._set_pill_icon_color(QColor(72, 187, 120))
 
         self._pill_text = QLabel("Update available")
 
@@ -2402,9 +2711,12 @@ class AboutDialog(QDialog):
 
         self._pill_text.setWordWrap(False)
 
-        pill_l.addWidget(pill_icon)
+        pill_l.addWidget(self._update_spinner, 0, Qt.AlignmentFlag.AlignVCenter)
+        pill_l.addWidget(self._pill_icon)
         pill_l.addWidget(self._pill_text)
 
+        self._set_pill_variant("update")
+        self._update_spinner.hide()
         self.update_pill.setVisible(False)
 
         h.addWidget(self.update_pill, 0, Qt.AlignmentFlag.AlignTop)
@@ -2547,27 +2859,113 @@ class AboutDialog(QDialog):
         root.addWidget(sep)
         root.addLayout(btns)
 
+        self._has_update = False
+
         # Connect the queued signal for reliable UI updates
 
         self.updateFound.connect(self._apply_update_visuals)
+        self.updateCheckFinished.connect(self._on_update_check_finished)
 
         # start async update check
 
         QTimer.singleShot(0, lambda: self._check_for_update(_is_newer))
 
+    def _set_update_checking(self, active: bool, *, keep_pill_when_stopping: bool = False) -> None:
+        if active:
+            self._has_update = False
+            self._set_pill_variant("checking")
+            self._pill_text.setText("Checking for updates...")
+            self._set_pill_icon_color(None)
+            self._update_spinner.start()
+            self.update_pill.setVisible(True)
+            self.btn_release.setVisible(False)
+            self.update_pill.setMinimumWidth(0)
+            self.update_pill.adjustSize()
+        else:
+            self._update_spinner.stop()
+            if not keep_pill_when_stopping:
+                self.update_pill.setVisible(False)
+            else:
+                self.update_pill.setVisible(True)
+            self.update_pill.adjustSize()
+
+        header_layout = self.header.layout()
+        if header_layout is not None:
+            header_layout.invalidate()
+            self.header.adjustSize()
+
+    def _on_update_check_finished(self, has_update: bool) -> None:
+        self._has_update = has_update
+        self._set_update_checking(False, keep_pill_when_stopping=True)
+        if has_update:
+            return
+
+        self._set_pill_variant("latest")
+        self._pill_text.setText("Using latest version")
+        self._set_pill_icon_color(QColor(148, 118, 240))
+        self.btn_release.setVisible(False)
+        self.update_pill.setMinimumWidth(0)
+        self.update_pill.adjustSize()
+
     # ---------- update logic ----------
+
+    def _set_pill_variant(self, variant: str) -> None:
+        if self.update_pill.property("variant") == variant:
+            return
+        self.update_pill.setProperty("variant", variant)
+        self._refresh_update_pill_style()
+
+    def _refresh_update_pill_style(self) -> None:
+        style = self.update_pill.style()
+        if style is None:
+            self.update_pill.update()
+            self._pill_text.update()
+            return
+        style.unpolish(self.update_pill)
+        style.polish(self.update_pill)
+        self.update_pill.update()
+        self._pill_text.update()
+
+    def _set_pill_icon_color(self, color: Optional[QColor]) -> None:
+        if color is None:
+            self._pill_icon_color_key = None
+            self._pill_icon.setVisible(False)
+            return
+        color_obj = QColor(color)
+        key = color_obj.name(QColor.NameFormat.HexArgb)
+        if self._pill_icon_color_key == key:
+            self._pill_icon.setVisible(True)
+            return
+        self._pill_icon_color_key = key
+        pm = self._dot_pixmap(color_obj)
+        self._pill_icon.setPixmap(pm)
+        self._pill_icon.setVisible(True)
+
+    def _dot_pixmap(self, color: QColor, size: int = 14) -> QPixmap:
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        brush_color = QColor(color)
+        painter.setBrush(QBrush(brush_color))
+        painter.setPen(QPen(brush_color, 1))
+        r = size - 2
+        painter.drawEllipse(1, 1, r, r)
+        painter.end()
+        return pm
 
     def _check_for_update(self, is_newer_fn):
 
-        import threading, re
+        import threading
 
-        import requests
+        self._set_update_checking(True)
 
         headers = {
             "User-Agent": f"{self.app_name}-AboutDialog",
-            "Accept": "application/json",
+            "Accept": "application/json, text/html;q=0.9, */*;q=0.1",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
         }
-
 
         def _extract_version_candidate(data) -> Optional[str]:
             """Return a semantic version string if present."""
@@ -2605,27 +3003,122 @@ class AboutDialog(QDialog):
                     candidate = match.strip()
                     if candidate:
                         return candidate
+                targeted = None
+                try:
+                    targeted = re.search(
+                        rf"{re.escape(VERSION_APP_ID)}[^0-9]*([0-9]+(?:\.[0-9]+){{2}})",
+                        data,
+                        flags=re.IGNORECASE,
+                    )
+                except re.error:
+                    targeted = None
+                if targeted:
+                    candidate = targeted.group(1).strip()
+                    if candidate:
+                        return candidate
+                plain_match = re.search(r"\b\d+(?:\.\d+){2}\b", data)
+                if plain_match:
+                    candidate = plain_match.group(0).strip()
+                    if candidate:
+                        return candidate
                 return None
+
+        def _looks_like_html(text: str) -> bool:
+            if not text:
+                return False
+            snippet = text.lstrip().lower()
+            return snippet.startswith("<!doctype") or snippet.startswith("<html")
+
+        def _fallback_version_from_repoversion(base_url: str) -> Optional[str]:
+            parsed = urlparse(base_url)
+            query = parse_qs(parsed.query or "")
+            app_id = (query.get("app") or [VERSION_APP_ID])[0] or VERSION_APP_ID
+            track = (query.get("track") or ["stable"])[0] or "stable"
+
+            base_without_query = parsed._replace(query="", params="", fragment="").geturl()
+            repoversion_url = urljoin(base_without_query, "repoversion.json")
+
+            try:
+                status, body = _http_fetch(repoversion_url)
+            except Exception as exc:  # pragma: no cover - network issue
+                self._log.info("Repoversion fetch err (%s): %s", repoversion_url, exc)
+                return None
+
+            if status < 200 or status >= 300:
+                self._log.info(
+                    "Repoversion fetch status not OK (%s): %s", repoversion_url, status
+                )
+                return None
+
+            try:
+                data = json.loads(body or "{}")
+            except Exception as exc:
+                self._log.info("Repoversion parse err (%s): %s", repoversion_url, exc)
+                return None
+
+            if not isinstance(data, dict):
+                return None
+
+            apps = data.get("apps")
+            if isinstance(apps, list):
+                app_id_low = str(app_id).strip().lower()
+                for app in apps:
+                    if not isinstance(app, dict):
+                        continue
+                    if str(app.get("id", "")).strip().lower() != app_id_low:
+                        continue
+                    tracks = app.get("tracks") or {}
+                    chosen = tracks.get(track) or tracks.get("stable") or {}
+                    if isinstance(chosen, dict):
+                        ver = chosen.get("version")
+                        if isinstance(ver, str) and ver.strip():
+                            self._log.info(
+                                "Remote version fallback via repoversion.json (%s): %s",
+                                repoversion_url,
+                                ver,
+                            )
+                            return ver.strip()
             return None
 
-
+        def _http_fetch(url: str) -> tuple[int, str]:
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    status = resp.getcode() or 0
+                    raw = resp.read()
+                    charset = resp.headers.get_content_charset() or "utf-8"
+                    body = raw.decode(charset, errors="replace") if raw else ""
+                    return status, body
+            except urllib.error.HTTPError as err:
+                status = err.code or 0
+                raw = err.read() or b""
+                headers_obj = err.headers
+                charset = None
+                if headers_obj is not None:
+                    try:
+                        charset = headers_obj.get_content_charset()
+                    except Exception:
+                        charset = None
+                charset = charset or "utf-8"
+                body = raw.decode(charset, errors="replace") if raw else ""
+                return status, body
 
         def _fetch_remote_version() -> Optional[str]:
             for url in self.VERSION_ENDPOINTS:
                 try:
                     self._log.info("Fetch version info: %s", url)
-                    response = requests.get(url, headers=headers, timeout=6)
-                    body = response.text or ""
-                    self._log.info("Status=%s len=%s", response.status_code, len(body))
-                    if not response.ok:
+                    status, body = _http_fetch(url)
+                    self._log.info("Status=%s len=%s", status, len(body))
+                    if status < 200 or status >= 300:
                         continue
 
-                    primary_json = "format=json" in url and "app=target-tracker" in url
+                    is_json = "format=json" in url
+                    is_code = "format=code" in url
                     candidate: Optional[str] = None
 
-                    if "format=json" in url:
+                    if is_json:
                         try:
-                            data = response.json()
+                            data = json.loads(body or "{}")
                         except Exception as exc:
                             self._log.info("JSON parse err (%s): %s", url, exc)
                         else:
@@ -2633,50 +3126,49 @@ class AboutDialog(QDialog):
                             if candidate:
                                 self._log.info("Remote version candidate (JSON): %s", candidate)
                                 return candidate.strip()
-                            if primary_json:
-                                # For the canonical endpoint, skip unstructured fallbacks.
-                                continue
 
-                    if "format=code" in url:
-                        candidate = _extract_version_candidate(body)
-                    if candidate is None and not primary_json:
+                    if candidate is None:
                         candidate = _extract_version_candidate(body)
 
                     if candidate:
                         self._log.info("Remote version candidate: %s", candidate)
                         return candidate.strip()
-                except Exception as exc:
+
+                    if (is_code or is_json) and _looks_like_html(body):
+                        fallback = _fallback_version_from_repoversion(url)
+                        if fallback:
+                            return fallback.strip()
+                except urllib.error.URLError as exc:
                     self._log.info("Version fetch err (%s): %s", url, exc)
+                except Exception as exc:  # pragma: no cover - diagnostic
+                    self._log.info("Version fetch unexpected err (%s): %s", url, exc)
 
             return None
 
         def _worker():
-
-            remote = _fetch_remote_version()
-
-            self._log.info(
-                "Remote version fetched: %r (local=%r)", remote, self.local_version
-            )
-
-            if not remote:
-
-                return
-
+            has_update = False
+            remote: Optional[str] = None
             try:
+                remote = _fetch_remote_version()
+                self._log.info(
+                    "Remote version fetched: %r (local=%r)", remote, self.local_version
+                )
 
-                if is_newer_fn(remote, self.local_version):
+                if not remote:
+                    self._log.info("Remote version not available; skipping update UI.")
+                    return
 
-                    self._log.info("Newer version detected -> emitting signal")
-
-                    self.updateFound.emit(remote)  # queued across threads
-
-                else:
-
-                    self._log.info("No update available")
-
-            except Exception as e:
-
-                self._log.info("Version compare failed: %s", e)
+                try:
+                    if is_newer_fn(remote, self.local_version):
+                        has_update = True
+                        self._log.info("Newer version detected -> emitting signal")
+                        self.updateFound.emit(remote)  # queued across threads
+                    else:
+                        self._log.info("No update available")
+                except Exception as e:
+                    self._log.info("Version compare failed: %s", e)
+            finally:
+                self.updateCheckFinished.emit(has_update)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2684,11 +3176,15 @@ class AboutDialog(QDialog):
 
         """UI-thread: show transparent green pill and enable Update button."""
 
+        self._set_update_checking(False, keep_pill_when_stopping=True)
+
         try:
 
             text = f"Update {remote_version} available"
 
             self._pill_text.setText(text)
+            self._set_pill_variant("update")
+            self._set_pill_icon_color(QColor(72, 187, 120))
 
             # ensure text never clips
 
@@ -2892,12 +3388,12 @@ class MainView(QWidget):
 
         # actions
 
-        self.act_ignore = QAction(icon("block"), "Ignore Selected", self)
+        self.act_ignore = QAction(icon("ignore"), "Ignore Selected", self)
 
-        _unblock_ic = icon("unblock")
+        _unblock_ic = icon("unignore")
 
         self.act_unignore = QAction(
-            _unblock_ic if not _unblock_ic.isNull() else icon("block"),
+            _unblock_ic if not _unblock_ic.isNull() else icon("ignore"),
             "Unignore Selected",
             self,
         )
@@ -2950,7 +3446,7 @@ class MainView(QWidget):
 
         self.toolbar.addSeparator()
 
-        act_ignore_mgr = self.toolbar.addAction(icon("block"), "Ignored...")
+        act_ignore_mgr = self.toolbar.addAction(icon("ignore"), "Ignored...")
         act_ignore_mgr.triggered.connect(self.request_manage_ignore.emit)
 
         self.toolbar.addSeparator()
@@ -3079,23 +3575,43 @@ class MainView(QWidget):
 
     # ---- selection helpers to persist highlights while refreshing ----
 
-    def _selected_ids(self) -> List[int]:
+    def _selected_targets(self) -> List[TargetInfo]:
 
-        ids: List[int] = []
+        targets: List[TargetInfo] = []
 
         sel = self.table.selectionModel()
 
         if not sel:
 
-            return ids
+            return targets
 
         for proxy_idx in sel.selectedRows():
 
             src = self.proxy.mapToSource(proxy_idx)
 
-            row = self.model.row(src.row())
+            row_idx = src.row()
 
-            ids.append(int(row.user_id))
+            try:
+
+                targets.append(self.model.row(row_idx))
+
+            except Exception:
+
+                continue
+
+        return targets
+
+    def _selected_ids(self) -> List[int]:
+
+        ids: List[int] = []
+
+        for tgt in self._selected_targets():
+
+            uid = getattr(tgt, "user_id", None)
+
+            if isinstance(uid, int):
+
+                ids.append(int(uid))
 
         return ids
 
@@ -3530,13 +4046,19 @@ class MainView(QWidget):
 
     def _emit_remove_selected(self) -> bool:
 
-        ids = self._selected_ids()
+        targets = self._selected_targets()
 
-        if not ids:
+        if not targets:
 
             return False
 
-        self.request_remove_targets.emit(ids)
+        dlg = RemoveTargetsDialog(targets, self)
+
+        if dlg.exec() != int(QDialog.DialogCode.Accepted):
+
+            return False
+
+        self.request_remove_targets.emit([int(t.user_id) for t in targets])
 
         return True
 

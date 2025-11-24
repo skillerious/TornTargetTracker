@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Iterable, Optional, Sequence, Union, Dict, List
+from typing import Optional, Sequence, Union, Dict, List
 
-from PyQt6.QtCore import Qt, QEvent, QSize, QUrl, QTimer
+from PyQt6.QtCore import Qt, QEvent, QUrl, QTimer
 from PyQt6.QtGui import (
     QColor,
     QIcon,
@@ -135,6 +135,7 @@ class DocSection(QGroupBox):
         super().__init__(title)
         self.setObjectName("docSection")
         self._title = title
+               # cache for search
         self._text_cache = title.lower()
 
         # Collapsible
@@ -254,7 +255,7 @@ class DocumentationDialog(QDialog):
         self._version = _load_version()
         self._data_dir = get_appdata_dir()
 
-        # QSS
+        # QSS (kept, only layout selectors adjusted below)
         self.setStyleSheet("")
         self._apply_scoped_qss()
 
@@ -276,9 +277,7 @@ class DocumentationDialog(QDialog):
         iw.setContentsMargins(6, 6, 6, 6)
         iw.setSpacing(0)
 
-        app_ic = icon("help")
-        if app_ic.isNull():
-            app_ic = icon("info")
+        app_ic = icon("help") or icon("info")
         ic_lbl = QLabel()
         if not app_ic.isNull():
             ic_lbl.setPixmap(app_ic.pixmap(18, 18))
@@ -293,7 +292,6 @@ class DocumentationDialog(QDialog):
         subtitle = QLabel("Install • Configure • Master the workflow")
         subtitle.setProperty("muted", True)
 
-        # Pills row (keep your square look)
         chips = QWidget()
         chips_l = QHBoxLayout(chips)
         chips_l.setContentsMargins(0, 0, 0, 0)
@@ -314,7 +312,6 @@ class DocumentationDialog(QDialog):
         actions_l.setContentsMargins(0, 0, 0, 0)
         actions_l.setSpacing(6)
 
-        # Search with leading icon action
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("searchEdit")
         self.search_edit.setPlaceholderText("Search this tab…")
@@ -327,14 +324,12 @@ class DocumentationDialog(QDialog):
             search_act.setIcon(si)
         self.search_edit.addAction(search_act, QLineEdit.ActionPosition.LeadingPosition)
 
-        # Jump to section
         self.jump_combo = QComboBox()
         self.jump_combo.setObjectName("jumpCombo")
         self.jump_combo.setPlaceholderText("Jump to section")
         self.jump_combo.setMinimumWidth(240)
         self.jump_combo.activated.connect(self._jump_to_section)
 
-        # Density + collapse/expand
         self.btn_compact = QToolButton()
         self.btn_compact.setObjectName("linkBtn")
         self.btn_compact.setCheckable(True)
@@ -352,7 +347,6 @@ class DocumentationDialog(QDialog):
         self.btn_expand.setText("Expand all")
         self.btn_expand.clicked.connect(self._expand_all_in_tab)
 
-        # Data folder actions
         self.btn_open = QToolButton()
         self.btn_open.setText("Open data")
         self.btn_open.setObjectName("linkBtn")
@@ -373,7 +367,6 @@ class DocumentationDialog(QDialog):
         actions_l.addWidget(self.btn_open, 0)
         actions_l.addWidget(self.btn_copy, 0)
 
-        # Header layout
         hl.addWidget(icon_wrap, 0, Qt.AlignmentFlag.AlignTop)
         hl.addLayout(title_col, 1)
         hl.addWidget(actions, 0, Qt.AlignmentFlag.AlignBottom)
@@ -413,7 +406,7 @@ class DocumentationDialog(QDialog):
 
         self.splitter.addWidget(self.nav_panel)
 
-        # Right: Tabs
+        # Right: Tabs container
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -429,6 +422,14 @@ class DocumentationDialog(QDialog):
 
         self.splitter.setSizes([250, 870])
         root.addWidget(self.splitter, 1)
+
+        # --------------------------- Separator (layout) -----------------------
+        # Thin hairline ABOVE the footer to avoid drawing through the Close button.
+        self.footer_sep = QFrame(objectName="footerSep")
+        self.footer_sep.setFrameShape(QFrame.Shape.HLine)
+        self.footer_sep.setFrameShadow(QFrame.Shadow.Plain)
+        self.footer_sep.setLineWidth(1)
+        root.addWidget(self.footer_sep)
 
         # ------------------------------ Footer -------------------------------
         footer = QWidget(objectName="footer")
@@ -468,7 +469,9 @@ class DocumentationDialog(QDialog):
     # ------------------------------ Theming/QSS -----------------------------
 
     def _apply_fusion_dark(self) -> None:
-        self.setStyle(QStyleFactory.create("Fusion"))
+        self._fusion_style = QStyleFactory.create("Fusion")
+        if self._fusion_style is not None:
+            self.setStyle(self._fusion_style)
         palette = QPalette()
 
         win = QColor("#242629")
@@ -498,6 +501,7 @@ class DocumentationDialog(QDialog):
         self.setPalette(palette)
 
     def _apply_scoped_qss(self) -> None:
+        # NOTE: Colors and backgrounds retained. Only layout selectors added/adjusted.
         self.setStyleSheet(
             """
 /* ---------- base ---------- */
@@ -598,15 +602,17 @@ class DocumentationDialog(QDialog):
     margin-top: 16px;
     padding-top: 12px;    /* room for continuous top border */
 }
-/* Title pill — we also draw a 1px top border to visually continue the card's top line */
+/* (layout-only) hide the default check indicator while keeping collapsible behavior */
+#TTDocRoot QGroupBox#docSection::indicator { width: 0px; height: 0px; }
+/* Title pill — continuous top border */
 #TTDocRoot QGroupBox#docSection::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
     padding: 2px 10px;
     color: #f2f4f8;
-    background: #2a2e32;                /* match the card background so it blends */
-    border: 1px solid #3a4047;          /* outline around the pill */
-    border-top: 1px solid #3a4047;      /* ensures the 'missing' top border is visible */
+    background: #2a2e32;
+    border: 1px solid #3a4047;
+    border-top: 1px solid #3a4047;
     border-radius: 10px;
     margin-left: 12px;
     font-weight: 700;
@@ -627,7 +633,7 @@ class DocumentationDialog(QDialog):
 #TTDocRoot QScrollBar::handle:vertical { background: #4a5260; border-radius: 6px; }
 #TTDocRoot QScrollBar::handle:vertical:hover { background: #5b6b80; }
 
-/* top button */
+/* Floating Top button */
 #TTDocRoot QPushButton#topBtn {
     background: #2f343a;
     border: 1px solid #414852;
@@ -636,8 +642,13 @@ class DocumentationDialog(QDialog):
     color: #f2f4f8;
 }
 
-/* footer + buttons */
-#TTDocRoot QWidget#footer { border-top: 1px solid #3a4047; margin-top: 8px; }
+/* --- footer: layout-only tweak --- */
+/* dedicated hairline above the footer to avoid line through the button */
+#TTDocRoot QFrame#footerSep { min-height: 1px; max-height: 1px; background: #3a4047; }
+/* remove the border-on-footer so it doesn't cross the button */
+#TTDocRoot QWidget#footer { margin-top: 8px; }
+
+/* buttons */
 #TTDocRoot QPushButton {
     background: #30353a;
     border: 1px solid #454c57;
@@ -667,7 +678,7 @@ class DocumentationDialog(QDialog):
             self._sections_main_window(),
             tab_icon=icon("app"),
         )
-        # Escape '&' so Qt doesn't treat it as mnemonic → avoids underscores in some styles
+        # Escape '&' so Qt doesn't treat it as mnemonic
         self._add_tab(
             "Targets && Ignore",
             self._sections_targets(),

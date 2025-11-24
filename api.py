@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from models import TargetInfo
 from rate_limiter import RateLimiter
+from config import CONFIG
 
 logger = logging.getLogger("TargetTracker.API")
 if not logger.handlers:
@@ -20,6 +21,38 @@ if not logger.handlers:
     h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
     logger.addHandler(h)
     logger.setLevel(logging.INFO)
+
+
+# Torn API error codes and user-friendly messages
+class TornAPIError(Exception):
+    """Exception for Torn API errors."""
+    def __init__(self, code: int, message: str, user_friendly: str = None):
+        self.code = code
+        self.message = message
+        self.user_friendly = user_friendly or message
+        super().__init__(f"Torn API Error {code}: {message}")
+
+
+# User-friendly error messages for Torn API error codes
+TORN_ERROR_MESSAGES = {
+    0: ("Unknown error", "An unknown error occurred"),
+    1: ("Key is empty", "API key is missing"),
+    2: ("Incorrect key", "API key is invalid or incorrect"),
+    3: ("Wrong type", "Invalid API request type"),
+    4: ("Wrong fields", "Invalid API fields requested"),
+    5: ("Too many requests", "Rate limit exceeded - too many requests"),
+    6: ("Incorrect ID", "Invalid user ID"),
+    7: ("Incorrect ID-entity relation", "Invalid ID for this request type"),
+    8: ("IP block", "Your IP address has been blocked"),
+    9: ("API disabled", "Torn API is temporarily disabled"),
+    10: ("Key owner is in federal jail", "API key owner is in federal jail"),
+    11: ("Key change error", "Unable to read key information"),
+    12: ("Key read error", "Key could not be read"),
+    13: ("The key is temporarily disabled", "API key is temporarily disabled"),
+    16: ("Access level of this key is not high enough", "API key does not have sufficient access level"),
+    17: ("Backend error occurred", "Torn server error - try again later"),
+    18: ("API key has been paused by the owner", "API key has been paused"),
+}
 
 
 class TornAPI:
@@ -36,14 +69,28 @@ class TornAPI:
 
     BASE = "https://api.torn.com"
 
-    def __init__(self, api_key: str, limiter: RateLimiter):
+    def __init__(
+        self,
+        api_key: str,
+        limiter: RateLimiter,
+        max_attempts: int = None,
+        hard_timeout: float = None,
+        base_backoff: float = None,
+        max_backoff: float = None,
+    ):
         self.api_key = (api_key or "").strip()
         self.limiter = limiter
+
+        # Configurable retry parameters
+        self.max_attempts = max_attempts or CONFIG.MAX_RETRY_ATTEMPTS
+        self.hard_timeout = hard_timeout or CONFIG.DEFAULT_TIMEOUT_SEC
+        self.base_backoff = base_backoff or CONFIG.BASE_BACKOFF_SEC
+        self.max_backoff = max_backoff or CONFIG.MAX_BACKOFF_SEC
 
         # One opener for keep-alive
         self._opener = urllib.request.build_opener()
         self._default_headers = {
-            "User-Agent": "TargetTracker/2.6 (https://github.com/skillerious) Python-urllib",
+            "User-Agent": CONFIG.USER_AGENT,
             "Accept": "application/json",
             "Connection": "keep-alive",
         }
@@ -59,11 +106,11 @@ class TornAPI:
         qs = urllib.parse.urlencode({"selections": selections, "key": self.api_key})
         url = f"{self.BASE}/user/{uid}?{qs}"
 
-        # Retry policy (kept generous, but lower per-attempt timeout for shutdown responsiveness)
-        max_attempts = 8
-        base_backoff = 0.6
-        max_backoff = 8.0
-        hard_timeout = 10.0
+        # Use configured retry policy
+        max_attempts = self.max_attempts
+        base_backoff = self.base_backoff
+        max_backoff = self.max_backoff
+        hard_timeout = self.hard_timeout
 
         def _cancelled() -> Optional[TargetInfo]:
             if stop_event and stop_event.is_set():
@@ -89,15 +136,15 @@ class TornAPI:
                 # Torn logical error inside 200?
                 err = self._extract_torn_error(data)
                 if err:
-                    code_num, msg = err
-                    if self._is_retryable_torn_error(code_num, msg):
+                    if self._is_retryable_torn_error(err.code, err.message):
                         delay = self._advise_backoff(resp_headers=getattr(resp, "headers", {}), attempt=attempt,
                                                      base=base_backoff, cap=max_backoff)
-                        self._apply_penalty(delay, why=f"Torn error {code_num}: {msg}")
+                        self._apply_penalty(delay, why=f"Torn error {err.code}: {err.user_friendly}")
                         if self._sleep(delay, stop_event):
                             return self._info_with_error(uid, "Cancelled")
                         continue
-                    return self._info_with_error(uid, msg or f"Torn error {code_num}")
+                    # Non-retryable error - return with user-friendly message
+                    return self._info_with_error(uid, err.user_friendly)
 
                 # OK → parse into TargetInfo
                 info = self._to_target_info(uid, data)
@@ -142,10 +189,19 @@ class TornAPI:
         except Exception:
             return {}
 
-    def _extract_torn_error(self, data: Dict[str, Any]) -> Optional[tuple]:
+    def _extract_torn_error(self, data: Dict[str, Any]) -> Optional[TornAPIError]:
+        """Extract Torn API error from response with user-friendly message."""
         err = data.get("error")
         if isinstance(err, dict):
-            return (err.get("code"), err.get("error"))
+            code = err.get("code")
+            msg = err.get("error", "Unknown error")
+
+            # Get user-friendly message if available
+            if code in TORN_ERROR_MESSAGES:
+                api_msg, user_msg = TORN_ERROR_MESSAGES[code]
+                return TornAPIError(code, msg, user_msg)
+            else:
+                return TornAPIError(code or 0, msg, msg)
         return None
 
     def _is_retryable_torn_error(self, code: Optional[int], msg: Optional[str]) -> bool:
@@ -230,19 +286,24 @@ class TornAPI:
 
         info = TargetInfo(
             user_id=uid,
-            name=name,
+            name=name or "",
             level=level if isinstance(level, int) else None,
-            status_state=status_state,
-            status_desc=status_desc,
+            status_state=status_state or "Unknown",
+            status_desc=status_desc or "",
             status_until=status_until if isinstance(status_until, int) and status_until > 0 else None,
-            last_action_status=last_action_status,
-            last_action_relative=last_action_relative,
-            faction=faction_name,
+            last_action_status=last_action_status or "",
+            last_action_relative=last_action_relative or "",
+            faction=faction_name or "",
         )
+
+        # Safely check if status is "okay" (fix for None crash)
         try:
-            info.ok = (str(status_state).lower() == "okay")
-        except Exception:
-            pass
+            status_str = str(status_state or "").lower()
+            info.ok = ("okay" in status_str or "ok" in status_str)
+        except Exception as e:
+            logger.debug("Failed to determine okay status for user %s: %s", uid, e)
+            info.ok = False
+
         return info
 
     def _info_with_error(self, uid: int, msg: str) -> TargetInfo:

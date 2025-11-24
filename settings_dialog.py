@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 import os
 import threading
+import socket
 from typing import Dict, Optional, Tuple
 
-import requests
+import urllib.request
+import urllib.error
 
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QTimer
 from PyQt6.QtGui import (
@@ -106,6 +108,8 @@ class SettingsDialog(QDialog):
 
         self._settings = dict(settings or {})
         self._dirty = False
+        self._api_test_thread: Optional[threading.Thread] = None
+        self._api_test_stop = threading.Event()
 
         # Isolate from any global QSS, then apply scoped dark style
         self.setStyleSheet("")
@@ -652,14 +656,6 @@ class SettingsDialog(QDialog):
             self._set_footer_status("Paste an API key to test.", "warn", timeout_ms=4000)
             return
 
-        try:
-            import requests  # noqa: F401
-        except Exception:
-            QMessageBox.warning(self, "Test Key", "The 'requests' package is not installed.")
-            self.lbl_api_status.setText("<span style='color:#ff9b8e'>'requests' package missing.</span>")
-            self._set_footer_status("'requests' package missing. Install requirements.", "error", timeout_ms=5000)
-            return
-
         honor_retry_after = bool(self.chk_retry_after.isChecked()) if hasattr(self, "chk_retry_after") else True
 
         if hasattr(self, "btn_test"):
@@ -668,20 +664,44 @@ class SettingsDialog(QDialog):
 
         self.lbl_api_status.setText("<span class='helpSmall'>Testing against Torn…</span>")
 
+        # cancel any in-flight test
+        prev_thread = getattr(self, "_api_test_thread", None)
+        if prev_thread and prev_thread.is_alive():
+            self._api_test_stop.set()
+            try:
+                prev_thread.join(timeout=0.2)
+            except Exception:
+                pass
+        self._api_test_stop = threading.Event()
+
         result = {"status": "", "kind": "", "text": ""}
 
-        def worker():
+        def worker(stop_event: threading.Event):
             import time
+
             url = f"https://api.torn.com/user/?selections=basic&key={key}"
-            headers = {"User-Agent": "TargetTracker/1.0 (+pyqt)"}
-            timeout = (6, 8)
+            headers = {"User-Agent": "TargetTracker/1.0 (+pyqt)", "Accept": "application/json"}
+            timeout = 8.0
             max_attempts = 3
 
             try:
                 for attempt in range(1, max_attempts + 1):
+                    if stop_event.is_set():
+                        return
+                    req = urllib.request.Request(url, headers=headers)
+                    status = 0
+                    body = ""
+                    headers_obj = None
                     try:
-                        r = requests.get(url, headers=headers, timeout=timeout)
-                    except requests.Timeout:
+                        with urllib.request.urlopen(req, timeout=timeout) as resp:
+                            status = resp.getcode() or 0
+                            raw = resp.read() or b""
+                            headers_obj = resp.headers
+                    except urllib.error.HTTPError as err:
+                        status = err.code or 0
+                        raw = err.read() or b""
+                        headers_obj = err.headers
+                    except socket.timeout:
                         result.update(
                             status="<span style='color:#ff9b8e'>Timed out. Network slow?</span>",
                             kind="warn",
@@ -691,19 +711,29 @@ class SettingsDialog(QDialog):
                             time.sleep(0.6 * attempt)
                             continue
                         break
-                    except Exception as e:
+                    except Exception as exc:
                         result.update(
-                            status=f"<span style='color:#ff9b8e'>Request failed: {e}</span>",
+                            status=f"<span style='color:#ff9b8e'>Request failed: {exc}</span>",
                             kind="error",
-                            text=f"Request failed: {e}",
+                            text=f"Request failed: {exc}",
                         )
                         break
+                    else:
+                        charset = None
+                        if headers_obj is not None:
+                            try:
+                                charset = headers_obj.get_content_charset()
+                            except Exception:
+                                charset = None
+                        charset = charset or "utf-8"
+                        body = raw.decode(charset, errors="replace") if raw else ""
 
-                    if r.status_code == 429:
+                    if status == 429:
                         wait_s = 0
                         try:
-                            ra = r.headers.get("Retry-After")
-                            wait_s = int(float(ra)) if ra else 0
+                            if headers_obj is not None:
+                                ra = headers_obj.get("Retry-After")
+                                wait_s = int(float(ra)) if ra else 0
                         except Exception:
                             wait_s = 0
                         if honor_retry_after and wait_s and attempt < max_attempts:
@@ -716,19 +746,19 @@ class SettingsDialog(QDialog):
                         )
                         break
 
-                    if not r.ok:
+                    if status >= 400:
                         result.update(
-                            status=f"<span style='color:#ff9b8e'>HTTP {r.status_code} while checking key.</span>",
+                            status=f"<span style='color:#ff9b8e'>HTTP {status} while checking key.</span>",
                             kind="error",
-                            text=f"HTTP {r.status_code} while checking key.",
+                            text=f"HTTP {status} while checking key.",
                         )
-                        if r.status_code >= 500 and attempt < max_attempts:
+                        if status >= 500 and attempt < max_attempts:
                             time.sleep(0.6 * attempt)
                             continue
                         break
 
                     try:
-                        data = r.json()
+                        data = json.loads(body or "{}")
                     except Exception:
                         result.update(
                             status="<span style='color:#ff9b8e'>Non-JSON response from Torn.</span>",
@@ -738,8 +768,9 @@ class SettingsDialog(QDialog):
                         break
 
                     if isinstance(data, dict) and "error" in data:
-                        code = data["error"].get("code")
-                        desc = data["error"].get("error") or "Unknown error"
+                        err_info = data.get("error") or {}
+                        code = err_info.get("code")
+                        desc = err_info.get("error") or "Unknown error"
                         hint = " (Incorrect/expired key?)" if code in (1, 2) else (" (Temporarily rate-limited.)" if code in (5, 9) else "")
                         result.update(
                             status=f"<span style='color:#ff9b8e'>API error {code}: {desc}{hint}</span>",
@@ -758,12 +789,16 @@ class SettingsDialog(QDialog):
                     )
                     break
             finally:
-                status = result["status"] or "<span style='color:#ff9b8e'>Test ended unexpectedly.</span>"
-                kind = result["kind"] or ""
-                text = result["text"] or ""
-                self.apiTestFinished.emit(status, kind, text)
+                if not stop_event.is_set():
+                    status_html = result["status"] or "<span style='color:#ff9b8e'>Test ended unexpectedly.</span>"
+                    kind = result["kind"] or ""
+                    text_msg = result["text"] or ""
+                    self.apiTestFinished.emit(status_html, kind, text_msg)
+                self._api_test_thread = None
 
-        threading.Thread(target=worker, daemon=True).start()
+        thread = threading.Thread(target=worker, args=(self._api_test_stop,), daemon=True)
+        self._api_test_thread = thread
+        thread.start()
 
     def _handle_api_test_result(self, status_html: str, kind: str, message: str):
         self.lbl_api_status.setText(status_html)
@@ -778,6 +813,15 @@ class SettingsDialog(QDialog):
             self._set_footer_status(message, "warn" if kind == "warn" else "error", timeout_ms=5000)
         else:
             self._set_footer_status("", timeout_ms=0)
+
+    def closeEvent(self, event):
+        try:
+            if self._api_test_thread and self._api_test_thread.is_alive():
+                self._api_test_stop.set()
+                self._api_test_thread.join(timeout=0.2)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _pick_targets(self):
         p, _ = QFileDialog.getOpenFileName(self, "Pick targets JSON", "", "JSON (*.json)")
